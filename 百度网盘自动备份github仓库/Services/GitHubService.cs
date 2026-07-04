@@ -19,7 +19,7 @@ public class GitHubService
     public async Task<List<GitHubRepoInfo>> GetRepositoriesAsync(string username, string? githubToken)
     {
         var allRepos = new List<GitHubRepoInfo>();
-        var request = new HttpRequestMessage();
+        using var request = new HttpRequestMessage();
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
         request.Headers.UserAgent.Add(new ProductInfoHeaderValue("BaiduBackup", "1.0"));
 
@@ -36,7 +36,7 @@ public class GitHubService
                 : $"https://api.github.com/users/{username}/repos?per_page=100&page={page}&sort=updated";
 
             request.RequestUri = new Uri(url);
-            var response = await _http.SendAsync(request);
+            using var response = await _http.SendAsync(request);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -103,7 +103,7 @@ public class GitHubService
                 {
                     Owner = ownerLogin,
                     Name = repoName,
-                    FullName = fullName!,
+                    FullName = fullName ?? $"{ownerLogin}/{repoName}",
                     PrivateRepo = repo.GetProperty("private").GetBoolean(),
                     Description = desc,
                     DefaultBranch = defBranch,
@@ -121,30 +121,45 @@ public class GitHubService
     }
 
     /// <summary>
-    /// 下载仓库 ZIP 并写入目标流，支持进度回调。内建流中断重试（最多额外 2 次）。
+    /// 下载仓库 ZIP 并写入目标流，支持进度回调和 HTTP Range 断点续传。
+    /// 内建流中断重试（最多额外 2 次），内部重试自动续传。
     /// </summary>
     /// <param name="estimatedSize">
     /// 预估文件总字节数（来自 GitHub API 的 repo.size 字段，单位 KB×1024）。
     /// 当 HTTP Content-Length 不可用时，用此值计算下载百分比。
     /// </param>
     /// <param name="maxStreamRetries">流读取中断时的额外重试次数（默认 2，即最多 3 次总尝试）</param>
+    /// <param name="resumeFromBytes">
+    /// 断点续传起始字节偏移量。0 表示全新下载。&gt;0 时方法会：
+    /// ① 设置 destination.Position = resumeFromBytes
+    /// ② 发送 HTTP Range: bytes={resumeFromBytes}- 请求头
+    /// ③ 将新数据追加写入 destination（不覆盖已有数据）
+    /// </param>
     public async Task<long> DownloadRepositoryAsync(
         string owner, string repo, string branch, string? githubToken,
         Stream destination, long estimatedSize = 0,
         Action<long, long>? progressCallback = null,
-        int maxStreamRetries = 2)
+        int maxStreamRetries = 2,
+        long resumeFromBytes = 0)
     {
         var failures = new List<string>();
 
-        // 尝试 3 种下载 URL 的本地函数
-        async Task<HttpResponseMessage?> GetDownloadResponseAsync()
+        // 设置目标流的起始写入位置
+        if (resumeFromBytes > 0 && destination.CanSeek)
+        {
+            destination.Position = resumeFromBytes;
+            _logger.LogInformation("📌 断点续传: 从 {Offset}MB 处继续下载", resumeFromBytes / 1024.0 / 1024.0);
+        }
+
+        // 尝试 3 种下载 URL + Range 头的本地函数
+        async Task<HttpResponseMessage?> GetDownloadResponseAsync(long rangeStart)
         {
             failures.Clear();
             HttpResponseMessage? response = null;
 
             // 方案1: github.com 直接 archive 下载
             var archiveUrl = $"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip";
-            var (resp1, failReason1) = await TryDownloadWithReasonAsync(archiveUrl, githubToken);
+            var (resp1, failReason1) = await TryDownloadWithReasonAsync(archiveUrl, githubToken, rangeStart);
             if (resp1 != null)
             {
                 response = resp1;
@@ -159,7 +174,7 @@ public class GitHubService
             if (response == null)
             {
                 var codeloadUrl = $"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}";
-                var (resp2, failReason2) = await TryDownloadWithReasonAsync(codeloadUrl, githubToken);
+                var (resp2, failReason2) = await TryDownloadWithReasonAsync(codeloadUrl, githubToken, rangeStart);
                 if (resp2 != null)
                 {
                     response = resp2;
@@ -175,7 +190,7 @@ public class GitHubService
             if (response == null)
             {
                 var apiArchiveUrl = $"https://api.github.com/repos/{owner}/{repo}/zipball/{branch}";
-                var (resp3, failReason3) = await TryDownloadWithReasonAsync(apiArchiveUrl, githubToken);
+                var (resp3, failReason3) = await TryDownloadWithReasonAsync(apiArchiveUrl, githubToken, rangeStart);
                 if (resp3 != null)
                 {
                     response = resp3;
@@ -190,17 +205,26 @@ public class GitHubService
             return response;
         }
 
+        // 累计已下载量（含调用前就有的数据，用于进度报告）
+        long alreadyDownloaded = destination.CanSeek ? destination.Position : 0;
+        // 当前 Range 起始位置
+        long currentRangeStart = alreadyDownloaded;
+
         int totalAttempts = maxStreamRetries + 1; // 首次 + retry 次数
         for (int attempt = 0; attempt < totalAttempts; attempt++)
         {
-            // 重试时重置 destination 流位置
+            // 内部重试：从已下载位置继续（不重置流！）
             if (attempt > 0 && destination.CanSeek)
             {
-                destination.SetLength(0);
-                destination.Position = 0;
+                currentRangeStart = destination.Position; // 当前流末尾 = 下次 Range 起点
+                alreadyDownloaded = currentRangeStart;
+                if (currentRangeStart > 0)
+                    _logger.LogInformation("📌 流中断，续传从 {Offset}MB 处继续", currentRangeStart / 1024.0 / 1024.0);
+                else
+                    _logger.LogInformation("📌 流中断，文件尚为空，从头下载");
             }
 
-            var response = await GetDownloadResponseAsync();
+            var response = await GetDownloadResponseAsync(currentRangeStart);
 
             // 三个方式都失败 → 输出详细原因
             if (response == null)
@@ -214,28 +238,64 @@ public class GitHubService
                     "请确认: 1) Token 有该仓库的 repo 权限 2) 仓库非空 3) 分支名正确。");
             }
 
-            // 优先用 HTTP Content-Length（精确）。
-            // 注意：不能 fallback 到 estimatedSize（GitHub API 的 repo.size），
-            // 因为 repo.size 是整个仓库含 .git 历史的大小，而 ZIP 下载只是当前分支快照，
-            // 实际 ZIP 通常远小于 repo.size，会误导进度条（如显示 150/300MB 实际已下完）。
-            var contentLength = response.Content.Headers.ContentLength;
-            var totalSize = contentLength ?? 0; // 未知大小时不伪造总大小
+            // 判断响应类型：206 Partial Content（Range 成功）vs 200 OK（服务器不支持 Range 或从头传）
+            bool isRangeResponse = response.StatusCode == System.Net.HttpStatusCode.PartialContent;
+            long totalFileSize; // 整个文件的总大小
+            long remainingToDownload; // 本次要下载的字节数
 
-            if (attempt == 0)
+            if (isRangeResponse)
             {
-                _logger.LogInformation("正在下载: {Owner}/{Repo} ({Branch}), Content-Length={CL}, 预估={Est}MB",
-                    owner, repo, branch,
-                    contentLength, estimatedSize / 1024.0 / 1024.0);
-
-                // 立即报告初始进度（让前端看到总量和 0%）
-                progressCallback?.Invoke(0, totalSize);
+                // 206: Content-Range: bytes X-Y/Z，Content-Length = 剩余字节
+                var contentRange = response.Content.Headers.ContentRange;
+                if (contentRange?.HasRange == true && contentRange.From == currentRangeStart)
+                {
+                    totalFileSize = contentRange.Length ?? (currentRangeStart + (response.Content.Headers.ContentLength ?? 0));
+                    remainingToDownload = response.Content.Headers.ContentLength ?? 0;
+                    _logger.LogInformation("✅ 206 Range 响应: bytes {From}-{To}/{Total}",
+                        contentRange.From, contentRange.To, totalFileSize);
+                }
+                else
+                {
+                    // Range 响应异常：可能服务器返回了不匹配的 Range，保险起见按 200 处理
+                    _logger.LogWarning("⚠️ 206 响应 Range 不匹配，按全新下载处理");
+                    response.Dispose();
+                    goto fallbackFullDownload;
+                }
             }
             else
             {
-                _logger.LogWarning("第 {Attempt}/{Max} 次流重试: {Owner}/{Repo}，Content-Length={CL}",
-                    attempt + 1, totalAttempts, owner, repo, contentLength);
-                progressCallback?.Invoke(0, totalSize);
+                // 200 OK：完整文件
+                if (currentRangeStart > 0)
+                {
+                    // 请求了续传但服务器返回完整文件 → 可能文件已变化，截断重新下
+                    _logger.LogWarning("⚠️ 请求续传但服务器返回 200（完整文件），截断旧数据重新下载");
+                    if (destination.CanSeek)
+                    {
+                        destination.SetLength(0);
+                        destination.Position = 0;
+                    }
+                    alreadyDownloaded = 0;
+                    currentRangeStart = 0;
+                }
+                totalFileSize = response.Content.Headers.ContentLength ?? 0;
+                remainingToDownload = totalFileSize;
             }
+
+            var displaySize = totalFileSize > 0 ? ByteFormatter.Format(totalFileSize) : "未知";
+            if (attempt == 0)
+            {
+                var resumeNote = alreadyDownloaded > 0 ? $" (已续传 {ByteFormatter.Format(alreadyDownloaded)})" : "";
+                _logger.LogInformation("正在下载: {Owner}/{Repo} ({Branch}), 总大小={Size}{Resume}",
+                    owner, repo, branch, displaySize, resumeNote);
+            }
+            else
+            {
+                _logger.LogWarning("第 {Attempt}/{Max} 次重试: {Owner}/{Repo}, 总大小={Size}",
+                    attempt + 1, totalAttempts, owner, repo, displaySize);
+            }
+
+            // 立即报告初始进度
+            progressCallback?.Invoke(alreadyDownloaded, totalFileSize);
 
             try
             {
@@ -244,55 +304,62 @@ public class GitHubService
                 // 重定向后的响应体为原始 ZIP 字节流，不触发 .NET 10 的 DeflateStream 兼容问题。
                 using var netStream = await response.Content.ReadAsStreamAsync();
                 var buffer = new byte[81920]; // 80KB 分块
-                long totalRead = 0;
+                long newlyDownloaded = 0; // 本轮新下载的字节
                 int bytesRead;
 
                 while ((bytesRead = await netStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
                 {
                     await destination.WriteAsync(buffer, 0, bytesRead);
-                    totalRead += bytesRead;
-                    progressCallback?.Invoke(totalRead, totalSize);
+                    newlyDownloaded += bytesRead;
+                    progressCallback?.Invoke(alreadyDownloaded + newlyDownloaded, totalFileSize);
                 }
 
                 await destination.FlushAsync();
 
-                // 完整性校验：对比实际下载字节数与 Content-Length
-                if (contentLength.HasValue && totalRead < contentLength.Value)
+                long totalWritten = alreadyDownloaded + newlyDownloaded;
+
+                // 完整性校验
+                if (totalFileSize > 0 && totalWritten < totalFileSize)
                 {
                     throw new IOException(
-                        $"下载不完整: 预期 {FormatBytes(contentLength.Value)}，" +
-                        $"实际仅下载 {FormatBytes(totalRead)} ({totalRead * 100L / contentLength.Value}%)。" +
+                        $"下载不完整: 预期 {ByteFormatter.Format(totalFileSize)}，" +
+                        $"实际仅 {ByteFormatter.Format(totalWritten)} ({totalWritten * 100L / totalFileSize}%)。" +
                         "连接可能提前断开。");
                 }
+                if (remainingToDownload > 0 && newlyDownloaded < remainingToDownload)
+                {
+                    throw new IOException(
+                        $"本轮下载不完整: 预期 {ByteFormatter.Format(remainingToDownload)}，" +
+                        $"实际仅 {ByteFormatter.Format(newlyDownloaded)}。");
+                }
 
-                _logger.LogInformation("下载完成，实际大小: {Size}MB", totalRead / 1024.0 / 1024.0);
-                return totalRead;
+                _logger.LogInformation("下载完成，总大小: {Size}MB", totalWritten / 1024.0 / 1024.0);
+                return totalWritten;
             }
             catch (Exception ex) when (ex is IOException or HttpRequestException
                                          && attempt < totalAttempts - 1)
             {
-                response.Dispose();
                 var delayMs = (attempt + 1) * 3000; // 递增等待: 3s, 6s
+                var partialBytes = destination.CanSeek ? destination.Position : 0;
                 _logger.LogWarning(ex,
-                    "下载流中断 [第{Attempt}次, 共{Max}次]: {Owner}/{Repo}。" +
-                    "等待 {Delay}s 后重试...",
-                    attempt + 1, totalAttempts, owner, repo, delayMs / 1000);
+                    "下载流中断 [第{Attempt}次, 共{Max}次]: {Owner}/{Repo}, 已下载 {Partial}MB。" +
+                    "等待 {Delay}s 后从断点续传...",
+                    attempt + 1, totalAttempts, owner, repo,
+                    partialBytes / 1024.0 / 1024.0, delayMs / 1000);
                 await Task.Delay(delayMs);
+            }
+            finally
+            {
+                // 确保 response 在任何异常路径（包括最后一次不满足 when 条件的尝试）都能被释放
+                try { response?.Dispose(); } catch { }
             }
         }
 
-        // 不应该执行到这里（最后一次循环会在 catch 中不满足 when 条件而抛出）
+    fallbackFullDownload:
+        // 仅由 goto 跳转到达（206 响应的 Range 头不匹配时，见上方"⚠️ 206 响应 Range 不匹配"分支）
         throw new InvalidOperationException(
-            $"下载失败：经过 {totalAttempts} 次尝试，流仍然中断。" +
-            $"请检查网络连接后重试。");
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
-        if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
-        return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+            $"下载失败：GitHub 返回 206 Partial Content 但 Content-Range 头与请求不匹配。" +
+            $"请重试备份。");
     }
 
     /// <summary>
@@ -301,14 +368,14 @@ public class GitHubService
     public async Task<(int SizeKb, string DefaultBranch)> GetRepoInfoAsync(
         string owner, string repo, string? githubToken)
     {
-        var request = new HttpRequestMessage(HttpMethod.Get,
+        using var request = new HttpRequestMessage(HttpMethod.Get,
             $"https://api.github.com/repos/{owner}/{repo}");
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
         request.Headers.UserAgent.Add(new ProductInfoHeaderValue("BaiduBackup", "1.0"));
         if (!string.IsNullOrEmpty(githubToken))
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", githubToken);
 
-        var resp = await _http.SendAsync(request);
+        using var resp = await _http.SendAsync(request);
         resp.EnsureSuccessStatusCode();
 
         using var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
@@ -327,14 +394,26 @@ public class GitHubService
         return (size, defaultBranch);
     }
 
-    /// <summary>尝试下载并返回失败原因。成功返回 (response, null)，失败返回 (null, 原因描述)</summary>
+    /// <summary>
+    /// 尝试下载并返回失败原因。成功返回 (response, null)，失败返回 (null, 原因描述)。
+    /// </summary>
+    /// <param name="rangeStart">
+    /// 断点续传起始字节。&gt;0 时发送 Range: bytes={rangeStart}- 请求头。
+    /// 服务器支持则返回 206 Partial Content，不支持则返回 200 OK（完整文件）。
+    /// </param>
     private async Task<(HttpResponseMessage? Response, string? FailReason)> TryDownloadWithReasonAsync(
-        string url, string? githubToken)
+        string url, string? githubToken, long rangeStart = 0, int redirectDepth = 0)
     {
-        _logger.LogDebug("尝试下载: {Url}", url);
-        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        _logger.LogDebug("尝试下载: {Url} (rangeStart={RangeStart})", url, rangeStart);
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/zip"));
         request.Headers.UserAgent.Add(new ProductInfoHeaderValue("BaiduBackup", "1.0"));
+
+        if (rangeStart > 0)
+        {
+            // 断点续传：模仿浏览器的 Range 请求方式
+            request.Headers.Range = new RangeHeaderValue(rangeStart, null);
+        }
 
         if (!string.IsNullOrEmpty(githubToken))
         {
@@ -343,10 +422,11 @@ public class GitHubService
 
         var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
 
+        // 2xx 成功（200 完整 / 206 部分内容）
         if (response.IsSuccessStatusCode)
             return (response, null);
 
-        // 302 重定向 → 跟随
+        // 302 重定向 → 跟随（递归时保持 rangeStart 不变）
         if (response.StatusCode == System.Net.HttpStatusCode.Redirect ||
             response.StatusCode == System.Net.HttpStatusCode.Found)
         {
@@ -354,8 +434,11 @@ public class GitHubService
             response.Dispose();
             if (!string.IsNullOrEmpty(redirectUrl))
             {
-                _logger.LogInformation("跟随重定向到: {Url}", redirectUrl);
-                return await TryDownloadWithReasonAsync(redirectUrl, githubToken);
+                const int maxRedirectDepth = 5;
+                if (redirectDepth >= maxRedirectDepth)
+                    return (null, $"重定向次数过多 (>{maxRedirectDepth})，可能是循环重定向");
+                _logger.LogInformation("跟随重定向到: {Url} (range={Range}, depth={Depth})", redirectUrl, rangeStart, redirectDepth + 1);
+                return await TryDownloadWithReasonAsync(redirectUrl, githubToken, rangeStart, redirectDepth + 1);
             }
             return (null, "重定向但无 Location 头");
         }
@@ -396,10 +479,4 @@ public class GitHubService
         return (null, failReason);
     }
 
-    /// <summary>尝试从指定 URL 下载（兼容旧接口）</summary>
-    private async Task<HttpResponseMessage?> TryDownloadAsync(string url, string? githubToken)
-    {
-        var (response, _) = await TryDownloadWithReasonAsync(url, githubToken);
-        return response;
-    }
 }

@@ -194,19 +194,18 @@
             </div>
         </div>
         <div class="form-group">
-            <label class="form-label">授权回调地址（必须与百度开放平台配置的完全一致！）</label>
-            <input type="text" class="form-input" id="redirectUri" placeholder="http://localhost:64554/callback.html">
+            <label class="form-label">授权回调地址 <span style="font-weight:400;color:var(--text-secondary);font-size:11px;">（系统自动检测，复制到 <a href="https://pan.baidu.com/union/console/home" target="_blank" style="color:var(--accent);">百度网盘开放平台控制台</a>「安全设置→授权回调页」即可）</span></label>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <code id="callbackUriDisplay" style="flex:1;background:var(--input-bg);padding:8px 12px;border-radius:6px;font-size:13px;word-break:break-all;border:1px solid var(--input-border);color:var(--accent);"></code>
+                <button class="btn btn-sm" onclick="copyCallbackUri()" title="复制回调地址" style="white-space:nowrap;flex-shrink:0;background:var(--input-bg);border:1px solid var(--input-border);color:var(--text);">📋 复制</button>
+            </div>
         </div>
         <div style="margin-top:6px;">
-            <span class="info-text">🔗 <a href="https://pan.baidu.com/union/console/home" target="_blank" style="color:var(--accent);text-decoration:none;border-bottom:1px dashed var(--accent);">百度网盘开放平台控制台</a>（获取 AppKey / SecretKey）</span>
+            <span class="info-text">🔗 <a href="https://pan.baidu.com/union/console/home" target="_blank" style="color:var(--accent);text-decoration:none;border-bottom:1px dashed var(--accent);">百度网盘开放平台控制台</a>（获取 AppKey / SecretKey，粘贴回调地址）</span>
         </div>
         <div style="margin-top:12px;">
             <button class="btn btn-primary" id="authorizeBtn" onclick="authorizeBaidu()">🔗 授权百度网盘</button>
             <span class="info-text" style="display:inline-block;margin-left:10px;" id="tokenHint"></span>
-        </div>
-        <div style="margin-top:8px;">
-            <span class="info-text">💡 当前实际地址：</span>
-            <code id="callbackUriDisplay" style="background:var(--input-bg);padding:2px 8px;border-radius:4px;font-size:12px;word-break:break-all;"></code>
         </div>
     </div>
 
@@ -376,6 +375,27 @@ function saveConfig() {
 }
 
 // ==================== 百度授权 ====================
+// 回调地址由系统自动检测，无须用户填写
+function getCallbackUri() {
+    return window.location.origin + '/callback.html';
+}
+
+function copyCallbackUri() {
+    var uri = getCallbackUri();
+    navigator.clipboard.writeText(uri).then(function() {
+        toast('✅ 已复制回调地址');
+    }).catch(function() {
+        // fallback: 选中文本
+        var el = dom.callbackUriDisplay;
+        var range = document.createRange();
+        range.selectNodeContents(el);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        toast('📋 请手动 Ctrl+C 复制');
+    });
+}
+
 function authorizeBaidu() {
     state.appKey = dom.appKey.value.trim();
     state.secretKey = dom.secretKey.value.trim();
@@ -386,8 +406,7 @@ function authorizeBaidu() {
     const oauthState = crypto.randomUUID();
     sessionStorage.setItem('baidu_oauth_state', oauthState);
 
-    // 使用手动设置或自动检测的回调地址
-    const redirectUri = dom.redirectUri.value.trim() || (window.location.origin + '/callback.html');
+    const redirectUri = getCallbackUri();
     const authUrl = 'https://openapi.baidu.com/oauth/2.0/authorize?'+
         'response_type=code&client_id='+encodeURIComponent(state.appKey)+
         '&redirect_uri='+encodeURIComponent(redirectUri)+
@@ -400,8 +419,7 @@ function authorizeBaidu() {
 
 async function exchangeToken(code) {
     log('🔄 正在换取 access_token...');
-    // 使用已保存的回调地址
-    var redirectUri = dom.redirectUri.value.trim() || (window.location.origin + '/callback.html');
+    var redirectUri = getCallbackUri();
     try {
         const resp = await fetch('/api/auth/baidu', {
             method:'POST',
@@ -847,13 +865,12 @@ function init() {
      'detailProgress','detailStageIcon','detailStageText','detailFileName',
      'detailProgressBar','detailProgressText',
     'logConsole','clearLogBtn','authStatus','tokenHint','steps',
-     'redirectUri','callbackUriDisplay','tempDirDisplay','netdiskPathDisplay',
+     'callbackUriDisplay','tempDirDisplay','netdiskPathDisplay',
      'allCompleteBanner','allCompleteTime','recentBackupResults'].forEach(id=>dom[id]=$('#'+id));
     dom.steps=document.querySelectorAll('.step');
 
-    // 自动检测并提示回调地址
-    var actualCallback = window.location.origin + '/callback.html';
-    if (!dom.redirectUri.value) dom.redirectUri.value = actualCallback;
+    // 自动检测并显示回调地址
+    var actualCallback = getCallbackUri();
     dom.callbackUriDisplay.textContent = actualCallback;
     log('🔗 授权回调地址: ' + actualCallback, 'info');
 

@@ -101,16 +101,7 @@ public class BaiduNetdiskService
 
     private async Task<TokenResponse> RequestTokenAsync(Dictionary<string, string> formData)
     {
-        HttpResponseMessage response;
-        try
-        {
-            response = await _http.PostAsync(TokenUrl, new FormUrlEncodedContent(formData));
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException($"无法连接百度 OAuth 服务器: {ex.Message}", ex);
-        }
-
+        using HttpResponseMessage response = await _http.PostAsync(TokenUrl, new FormUrlEncodedContent(formData));
         var json = await ReadResponseStringAsync(response);
         _logger.LogDebug("Token 响应: HTTP {Code}, Body: {Json}", (int)response.StatusCode, json);
 
@@ -304,7 +295,7 @@ public class BaiduNetdiskService
             uploadid[..Math.Min(uploadid.Length, 20)] + "...");
 
         var body = new FormUrlEncodedContent(payload);
-        var resp = await _http.PostAsync(url, body);
+        using var resp = await _http.PostAsync(url, body);
         var json = await ReadResponseStringAsync(resp);
         _logger.LogInformation("create 响应: {Json}", json);
 
@@ -381,7 +372,7 @@ public class BaiduNetdiskService
             path, size / 1024.0 / 1024.0, blockList.Count, contentMd5);
 
         var body = new FormUrlEncodedContent(payload);
-        var resp = await _http.PostAsync(url, body);
+        using var resp = await _http.PostAsync(url, body);
         var json = await ReadResponseStringAsync(resp);
         _logger.LogInformation("precreate 响应: {Json}", json);
 
@@ -442,7 +433,7 @@ public class BaiduNetdiskService
         chunkContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         formContent.Add(chunkContent, "file", "chunk");
 
-        var resp = await _http.PostAsync(url, formContent);
+        using var resp = await _http.PostAsync(url, formContent);
         var json = await ReadResponseStringAsync(resp);
 
         if (!resp.IsSuccessStatusCode)
@@ -474,7 +465,7 @@ public class BaiduNetdiskService
                   $"&path={HttpUtility.UrlEncode(fullPath)}" +
                   "&dlink=0&extra=0";
 
-        var resp = await _http.GetAsync(url);
+        using var resp = await _http.GetAsync(url);
         var json = await ReadResponseStringAsync(resp);
         _logger.LogDebug("filemetas 响应: {Json}", json);
 
@@ -509,7 +500,7 @@ public class BaiduNetdiskService
         });
 
         _logger.LogInformation("尝试删除网盘文件: {Path}", fullPath);
-        var resp = await _http.PostAsync(url, body);
+        using var resp = await _http.PostAsync(url, body);
         var json = await ReadResponseStringAsync(resp);
         _logger.LogDebug("删除文件响应: {Json}", json);
 
@@ -547,7 +538,7 @@ public class BaiduNetdiskService
         });
 
         _logger.LogInformation("重命名: {OldPath} → {NewName}", oldPath, newName);
-        var resp = await _http.PostAsync(url, body);
+        using var resp = await _http.PostAsync(url, body);
         var json = await ReadResponseStringAsync(resp);
         _logger.LogDebug("重命名响应: {Json}", json);
 

@@ -155,12 +155,6 @@ public class BackupController : ControllerBase
 
     // ==================== 备份 API ====================
 
-    [HttpGet("tempdir")]
-    public IActionResult GetTempDirectory()
-    {
-        return Ok(new { tempDir = _tempDir });
-    }
-
     [HttpPost("single")]
     public async Task<ActionResult<ApiResponse<BackupResult>>> BackupSingle(
         [FromBody] SingleBackupRequest request)
@@ -174,7 +168,6 @@ public class BackupController : ControllerBase
 
         var key = $"{request.Owner}/{request.Repo}/{request.Branch}";
         var zipFileName = $"{request.Repo}.zip";
-        var tempFile = Path.Combine(_tempDir, $"{request.Repo}.zip");
 
         // 初始化进度
         var progress = new BackupProgressInfo
@@ -185,6 +178,7 @@ public class BackupController : ControllerBase
         };
         _progress[key] = progress;
 
+        string? tempFile = null;
         bool success = false;
         try
         {
@@ -215,67 +209,38 @@ public class BackupController : ControllerBase
                 }));
             }
 
-            // 2. 从 GitHub 下载到临时文件
-            // 删除可能存在的残缺文件（上次下载中断留下的）
-            try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
-            catch (Exception ex) { _logger.LogWarning(ex, "清理旧临时文件失败: {Temp}", tempFile); }
-
-            // 先通过 GitHub API 获取仓库元数据，拿到大小预估
-            long estimatedSize = 0;
-            try
-            {
-                var (sizeKb, _) = await _gitHubService.GetRepoInfoAsync(
-                    request.Owner, request.Repo, request.GitHubToken);
-                estimatedSize = sizeKb * 1024L; // KB → 字节（粗略估算）
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "获取仓库元数据失败（不影响下载），使用 0 作为预估值");
-            }
-
+            // 2. 下载（带双层重试 + HTTP Range 断点续传，最多 3×5=15 次尝试）
             progress.Message = $"📥 下载中... {zipFileName} (获取文件信息...)";
 
             var lastReport = DateTime.UtcNow;
-            long actualFileSize;
-            await using (var fs = new FileStream(tempFile, FileMode.Create, FileAccess.Write))
-            {
-                actualFileSize = await _gitHubService.DownloadRepositoryAsync(
-                    request.Owner, request.Repo, request.Branch, request.GitHubToken,
-                    fs, estimatedSize,
-                    (downloaded, total) =>
+            var (downloadedFile, actualFileSize) = await DownloadRepoWithRetryAsync(
+                request.Owner, request.Repo, request.Branch, request.GitHubToken,
+                progressCallback: (downloaded, total) =>
+                {
+                    progress.TotalBytes = total;
+                    progress.DownloadedBytes = downloaded;
+                    progress.DownloadPercent = total > 0
+                        ? (int)(downloaded * 100 / total) : 0;
+
+                    var now = DateTime.UtcNow;
+                    if ((now - lastReport).TotalMilliseconds >= 200)
                     {
-                        progress.TotalBytes = total;
-                        progress.DownloadedBytes = downloaded;
-                        progress.DownloadPercent = total > 0
-                            ? (int)(downloaded * 100 / total) : 0;
+                        progress.Message = $"📥 下载中... {zipFileName} ({ByteFormatter.Format(downloaded)}" +
+                            (total > 0 ? $" / {ByteFormatter.Format(total)})" : ")");
+                        lastReport = now;
+                    }
+                });
+            tempFile = downloadedFile;
 
-                        var now = DateTime.UtcNow;
-                        if ((now - lastReport).TotalMilliseconds >= 200)
-                        {
-                            progress.Message = $"📥 下载中... {zipFileName} ({FormatBytes(downloaded)}" +
-                                (total > 0 ? $" / {FormatBytes(total)})" : ")");
-                            lastReport = now;
-                        }
-                    });
-            }
-
-            // ✅ 完整性校验：文件不能为空
-            if (actualFileSize == 0)
-            {
-                throw new InvalidOperationException(
-                    $"下载失败: 文件大小为 0 ({zipFileName})。可能仓库内容为空或下载链接失效。");
-            }
-            _logger.LogInformation("下载完整性校验通过: {File} = {Size}MB", zipFileName, actualFileSize / 1024.0 / 1024.0);
-
-            var fileInfo = new FileInfo(tempFile);
-            progress.DownloadedBytes = fileInfo.Length;
+            // 下载完成
             progress.DownloadPercent = 100;
-            progress.TotalBytes = fileInfo.Length;
-            progress.Message = $"📥 下载完成: {zipFileName} ({FormatBytes(fileInfo.Length)})";
+            progress.DownloadedBytes = actualFileSize;
+            progress.TotalBytes = actualFileSize;
+            progress.Message = $"📥 下载完成: {zipFileName} ({ByteFormatter.Format(actualFileSize)})";
             _logger.LogInformation("下载完成, 临时文件: {Temp}, 大小: {Size}MB",
-                tempFile, fileInfo.Length / 1024.0 / 1024.0);
+                tempFile, actualFileSize / 1024.0 / 1024.0);
 
-            // 2. 上传到百度网盘（带进度）
+            // 3. 上传到百度网盘（带进度）
             progress.Stage = "uploading";
             progress.Message = $"📤 上传中... {zipFileName} (0%)";
             await using var readStream = new FileStream(tempFile, FileMode.Open, FileAccess.Read);
@@ -300,7 +265,7 @@ public class BackupController : ControllerBase
             _logger.LogInformation("=== 备份完成: {Path} ===", resultPath);
 
             // 记录已备份（含文件大小，用于完整性校验）
-            MarkRepoBackedUp(request.Owner, request.Repo, request.Branch, fileInfo.Length);
+            MarkRepoBackedUp(request.Owner, request.Repo, request.Branch, actualFileSize);
             CheckAllComplete();
 
             return Ok(ApiResponse<BackupResult>.Ok(new BackupResult
@@ -311,7 +276,7 @@ public class BackupController : ControllerBase
                 Success = true,
                 Message = "备份成功",
                 FilePath = resultPath,
-                FileSize = fileInfo.Length
+                FileSize = actualFileSize
             }));
         }
         catch (Exception ex)
@@ -344,143 +309,227 @@ public class BackupController : ControllerBase
         }
         finally
         {
-            if (success)
+            if (success && tempFile != null)
             {
                 // 上传成功才删除临时文件
                 try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
                 catch (Exception ex) { _logger.LogWarning(ex, "清理临时文件失败: {Temp}", tempFile); }
             }
-            else
+            else if (!success && tempFile != null)
             {
                 _logger.LogInformation("上传失败，保留临时文件以便重试: {Temp}", tempFile);
             }
         }
     }
 
-    /// <summary>带重试的单仓库备份</summary>
-    private async Task<(BackupResult Result, RepoBackupStatus Status)> BackupSingleRepoWithRetryAsync(
-        BackupRepoItem repo, BatchBackupRequest request, int maxRetries, int retryDelayMs)
+    /// <summary>
+    /// 下载仓库 ZIP 到临时文件，带双层重试 + HTTP Range 断点续传。
+    /// 内层每轮最多 5 次尝试（续传），外层最多 3 轮重新开始，总计最多 15 次。
+    /// </summary>
+    /// <returns>(临时文件路径, 文件字节数)</returns>
+    private async Task<(string TempFile, long FileSize)> DownloadRepoWithRetryAsync(
+        string owner, string repo, string branch, string? gitHubToken,
+        Action<long, long>? progressCallback = null)
     {
-        var tempFile = Path.Combine(_tempDir, $"{repo.Repo}.zip");
+        var tempFile = Path.Combine(_tempDir, $"{repo}.zip");
+        const int MaxRestartCycles = 3;
+        const int AttemptsPerCycle = 5;
+        const int ContinueDelayMs = 5000;
 
-        for (int attempt = 1; attempt <= maxRetries; attempt++)
+        // 先获取仓库大小预估（用于进度条，非必须）
+        long estimatedSize = 0;
+        try
         {
-            bool repoSuccess = false;
-            try
+            var (sizeKb, _) = await _gitHubService.GetRepoInfoAsync(owner, repo, gitHubToken);
+            estimatedSize = sizeKb * 1024L;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "获取仓库元数据失败（不影响下载），使用 0 作为预估值");
+        }
+
+        for (int restartCycle = 1; restartCycle <= MaxRestartCycles; restartCycle++)
+        {
+            for (int attempt = 1; attempt <= AttemptsPerCycle; attempt++)
             {
-                // 1. 从 GitHub 下载到临时文件
-                //    每次尝试前删除可能存在的残缺文件（上次中断留下的），确保完整重新下载
-                try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
-                catch (Exception ex) { _logger.LogWarning(ex, "清理旧临时文件失败: {Temp}", tempFile); }
-
-                _logger.LogInformation("第{Attempt}次尝试 - 下载: {Owner}/{Repo}", attempt, repo.Owner, repo.Repo);
-                long actualDownloadSize;
-                await using (var fs = new FileStream(tempFile, FileMode.Create, FileAccess.Write))
+                try
                 {
-                    actualDownloadSize = await _gitHubService.DownloadRepositoryAsync(
-                        repo.Owner, repo.Repo, repo.Branch, request.GitHubToken, fs);
-                }
+                    bool isFullRestart = (attempt == AttemptsPerCycle);
 
-                // 完整性校验：文件不能为空，且不能明显小于实际写入量
-                var dlFileInfo = new FileInfo(tempFile);
-                if (dlFileInfo.Length == 0)
-                {
-                    throw new InvalidOperationException(
-                        $"下载失败: 文件大小为 0 ({tempFile})。可能仓库内容为空或下载链接失效。");
-                }
-                if (actualDownloadSize > 0 && dlFileInfo.Length < actualDownloadSize)
-                {
-                    throw new InvalidOperationException(
-                        $"文件写入不完整: 期望 {actualDownloadSize} 字节，磁盘仅有 {dlFileInfo.Length} 字节。");
-                }
-                _logger.LogInformation("下载完整性校验通过: {File} = {Size}MB",
-                    tempFile, dlFileInfo.Length / 1024.0 / 1024.0);
+                    // === 准备下载：决定文件模式和续传偏移 ===
+                    long resumeFromBytes = 0;
+                    FileMode fileMode;
 
-                var fileInfo = dlFileInfo;
-                _logger.LogInformation("下载完成, 临时文件: {Temp}, 大小: {Size}MB",
-                    tempFile, fileInfo.Length / 1024.0 / 1024.0);
-
-                // 2. 上传到百度网盘
-                var zipFileName = $"{repo.Repo}.zip";
-                await using var readStream = new FileStream(tempFile, FileMode.Open, FileAccess.Read);
-                var resultPath = await _baiduService.UploadFileAsync(
-                    request.AccessToken, readStream, request.UploadPath, zipFileName);
-
-                repoSuccess = true;
-                var successResult = new BackupResult
-                {
-                    Owner = repo.Owner,
-                    Repo = repo.Repo,
-                    Branch = repo.Branch,
-                    Success = true,
-                    Message = attempt > 1 ? $"重试第{attempt}次成功" : "备份成功",
-                    FilePath = resultPath,
-                    FileSize = fileInfo.Length
-                };
-                return (successResult, RepoBackupStatus.Success);
-            }
-            catch (Exception ex)
-            {
-                // 下载/上传失败 → 删除可能残缺的临时文件，确保下次重试从头开始
-                try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
-                catch (Exception exDel) { _logger.LogWarning(exDel, "清理失败临时文件失败: {Temp}", tempFile); }
-
-                var msg = ex.Message;
-                // 可跳过的情况（空仓库/无内容/无访问权限）不重试
-                var isSkip = msg.Contains("无可用内容") || msg.Contains("仓库或分支不存在") || msg.Contains("无权访问");
-                if (isSkip)
-                {
-                    _logger.LogWarning("仓库备份跳过: {Owner}/{Repo}", repo.Owner, repo.Repo);
-                    return (new BackupResult
+                    if (attempt == 1 || isFullRestart)
                     {
-                        Owner = repo.Owner,
-                        Repo = repo.Repo,
-                        Branch = repo.Branch,
-                        Success = false,
-                        Message = msg
-                    }, RepoBackupStatus.Skipped);
-                }
+                        // 首次或重新开始：清空旧文件
+                        if (isFullRestart)
+                        {
+                            try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+                            catch (Exception ex) { _logger.LogWarning(ex, "重新开始前清理临时文件失败: {Temp}", tempFile); }
+                        }
+                        else if (restartCycle > 1)
+                        {
+                            try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+                            catch { }
+                        }
+                        fileMode = FileMode.Create;
+                        resumeFromBytes = 0;
+                    }
+                    else
+                    {
+                        // 继续下载：读取现有文件大小作为续传起点
+                        if (System.IO.File.Exists(tempFile))
+                        {
+                            var existingInfo = new FileInfo(tempFile);
+                            if (existingInfo.Length > 0)
+                            {
+                                resumeFromBytes = existingInfo.Length;
+                                fileMode = FileMode.Open;
+                                _logger.LogInformation("📌 断点续传: 已有 {Size}MB，从该处继续",
+                                    resumeFromBytes / 1024.0 / 1024.0);
+                            }
+                            else
+                            {
+                                fileMode = FileMode.Create;
+                                resumeFromBytes = 0;
+                            }
+                        }
+                        else
+                        {
+                            fileMode = FileMode.Create;
+                            resumeFromBytes = 0;
+                        }
+                    }
 
-                _logger.LogWarning(ex, "第{Attempt}/{Max}次尝试失败: {Owner}/{Repo}",
-                    attempt, maxRetries, repo.Owner, repo.Repo);
+                    var phaseLabel = attempt == 1 ? "首次下载" :
+                                     isFullRestart ? "重新开始下载" :
+                                     resumeFromBytes > 0 ? $"继续下载(已有{ByteFormatter.Format(resumeFromBytes)})" : "继续下载";
+                    _logger.LogInformation("第{Round}轮·第{Attempt}/{Max}次 ({Phase}): {Owner}/{Repo}",
+                        restartCycle, attempt, AttemptsPerCycle, phaseLabel, owner, repo);
 
-                if (attempt < maxRetries)
-                {
-                    // 失败后等待几秒再重试
-                    _logger.LogInformation("等待 {Delay}秒 后重试...", retryDelayMs / 1000);
-                    await Task.Delay(retryDelayMs);
+                    // 下载到临时文件
+                    // DownloadRepositoryAsync 内部会根据 resumeFromBytes 设置流 Position，无需额外 seek
+                    long actualDownloadSize;
+                    await using (var fs = new FileStream(tempFile, fileMode, FileAccess.Write))
+                    {
+                        actualDownloadSize = await _gitHubService.DownloadRepositoryAsync(
+                            owner, repo, branch, gitHubToken, fs,
+                            estimatedSize, progressCallback,
+                            resumeFromBytes: resumeFromBytes);
+                    }
+
+                    // 完整性校验
+                    var dlFileInfo = new FileInfo(tempFile);
+                    if (dlFileInfo.Length == 0)
+                        throw new InvalidOperationException(
+                            $"下载失败: 文件大小为 0 ({repo}.zip)。可能仓库内容为空或下载链接失效。");
+                    if (actualDownloadSize > 0 && dlFileInfo.Length < actualDownloadSize)
+                        throw new InvalidOperationException(
+                            $"文件写入不完整: 期望 {actualDownloadSize} 字节，磁盘仅有 {dlFileInfo.Length} 字节。");
+
+                    _logger.LogInformation("下载完整性校验通过: {File} = {Size}MB",
+                        tempFile, dlFileInfo.Length / 1024.0 / 1024.0);
+
+                    return (tempFile, dlFileInfo.Length);
                 }
-            }
-            finally
-            {
-                if (repoSuccess)
+                catch (Exception ex)
                 {
-                    try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
-                    catch (Exception ex2) { _logger.LogWarning(ex2, "清理临时文件失败: {Temp}", tempFile); }
+                    var msg = ex.Message;
+                    // 空仓库/无权限/分支不存在 → 直接抛出，不浪费重试
+                    if (msg.Contains("无可用内容") || msg.Contains("仓库或分支不存在") || msg.Contains("无权访问"))
+                    {
+                        try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+                        catch { }
+                        throw;
+                    }
+
+                    var isRestart = (attempt == AttemptsPerCycle);
+                    var partialInfo = System.IO.File.Exists(tempFile) ? new FileInfo(tempFile) : null;
+                    _logger.LogWarning(ex, "第{Round}轮·第{Attempt}/{Max}次失败{IsRestart}: {Owner}/{Repo}，已下载 {Partial}MB",
+                        restartCycle, attempt, AttemptsPerCycle,
+                        isRestart ? "（本轮已重新开始）" : "",
+                        owner, repo,
+                        partialInfo?.Length / 1024.0 / 1024.0 ?? 0);
+
+                    if (attempt < AttemptsPerCycle)
+                    {
+                        // 继续下载：不删文件（保留已有数据供 Range 续传），等 5s 后再试
+                        _logger.LogInformation("→ 继续下载（保留 {Partial}MB 已下载数据），等待 {Delay}s...",
+                            partialInfo?.Length / 1024.0 / 1024.0 ?? 0, ContinueDelayMs / 1000);
+                        await Task.Delay(ContinueDelayMs);
+                    }
+                    else
+                    {
+                        // 重新开始下载失败：删掉残缺文件，下一轮从头来
+                        try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+                        catch (Exception exDel) { _logger.LogWarning(exDel, "清理残缺文件失败: {Temp}", tempFile); }
+                    }
                 }
             }
         }
 
-        // 所有重试都失败
-        _logger.LogError("重试{Max}次全部失败: {Owner}/{Repo}",
-            maxRetries, repo.Owner, repo.Repo);
-        return (new BackupResult
-        {
-            Owner = repo.Owner,
-            Repo = repo.Repo,
-            Branch = repo.Branch,
-            Success = false,
-            Message = $"重试{maxRetries}次均失败，已保留下载文件"
-        }, RepoBackupStatus.Failed);
+        // 3 轮全部失败
+        throw new InvalidOperationException(
+            $"{owner}/{repo} 已重新开始 {MaxRestartCycles} 轮（共 {MaxRestartCycles * AttemptsPerCycle} 次）全部失败，已跳过");
     }
 
-    // 格式化字节数
-    private static string FormatBytes(long bytes)
+    /// <summary>带重试的单仓库备份（供批处理使用）</summary>
+    private async Task<(BackupResult Result, RepoBackupStatus Status)> BackupSingleRepoWithRetryAsync(
+        BackupRepoItem repo, BatchBackupRequest request)
     {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
-        if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
-        return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+        try
+        {
+            // 1. 下载（带双层重试 + Range 断点续传）
+            var (tempFile, fileSize) = await DownloadRepoWithRetryAsync(
+                repo.Owner, repo.Repo, repo.Branch, request.GitHubToken);
+
+            // 2. 上传到百度网盘
+            var zipFileName = $"{repo.Repo}.zip";
+            await using var readStream = new FileStream(tempFile, FileMode.Open, FileAccess.Read);
+            var resultPath = await _baiduService.UploadFileAsync(
+                request.AccessToken, readStream, request.UploadPath, zipFileName);
+
+            // 成功 → 清理临时文件
+            try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+            catch (Exception ex) { _logger.LogWarning(ex, "清理临时文件失败: {Temp}", tempFile); }
+
+            return (new BackupResult
+            {
+                Owner = repo.Owner,
+                Repo = repo.Repo,
+                Branch = repo.Branch,
+                Success = true,
+                Message = "备份成功",
+                FilePath = resultPath,
+                FileSize = fileSize
+            }, RepoBackupStatus.Success);
+        }
+        catch (Exception ex)
+        {
+            var msg = ex.Message;
+            // 空仓库/无权限/分支不存在 → 直接跳过
+            if (msg.Contains("无可用内容") || msg.Contains("仓库或分支不存在") || msg.Contains("无权访问"))
+            {
+                var tempFile = Path.Combine(_tempDir, $"{repo.Repo}.zip");
+                try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+                catch { }
+                _logger.LogWarning("仓库不可用，自动跳过: {Owner}/{Repo} — {Reason}", repo.Owner, repo.Repo, msg);
+                return (new BackupResult
+                {
+                    Owner = repo.Owner, Repo = repo.Repo, Branch = repo.Branch,
+                    Success = false, Message = msg
+                }, RepoBackupStatus.Skipped);
+            }
+
+            // 其他异常（网络波动已耗尽重试等）
+            _logger.LogError(ex, "{Owner}/{Repo} 备份失败（全部重试耗尽）", repo.Owner, repo.Repo);
+            return (new BackupResult
+            {
+                Owner = repo.Owner, Repo = repo.Repo, Branch = repo.Branch,
+                Success = false, Message = msg
+            }, RepoBackupStatus.Skipped);
+        }
     }
 
     [HttpPost("batch")]
@@ -495,9 +544,6 @@ public class BackupController : ControllerBase
         var result = new BatchBackupResult();
         var total = request.Repos.Count;
 
-        const int MaxRetries = 3;
-        const int RetryDelayMs = 30000; // 30秒，给百度服务端充足的同步时间
-
         _logger.LogInformation("========== 开始批量备份: {Count} 个仓库 ==========", total);
 
         for (int i = 0; i < total; i++)
@@ -506,8 +552,7 @@ public class BackupController : ControllerBase
             _logger.LogInformation("[{Index}/{Total}] {Owner}/{Repo} ({Branch})",
                 i + 1, total, repo.Owner, repo.Repo, repo.Branch);
 
-            var backupResult = await BackupSingleRepoWithRetryAsync(
-                repo, request, MaxRetries, RetryDelayMs);
+            var backupResult = await BackupSingleRepoWithRetryAsync(repo, request);
 
             switch (backupResult.Status)
             {

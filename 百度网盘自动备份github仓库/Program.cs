@@ -169,16 +169,18 @@ app.MapGet("/api/diagnostics/network", async (IHttpClientFactory httpClientFacto
         try
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-            sw.Stop();
-            results.Add(new
+            using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
             {
-                target = name,
-                url,
-                ok = true,
-                statusCode = (int)response.StatusCode,
-                latencyMs = sw.ElapsedMilliseconds
-            });
+                sw.Stop();
+                results.Add(new
+                {
+                    target = name,
+                    url,
+                    ok = true,
+                    statusCode = (int)response.StatusCode,
+                    latencyMs = sw.ElapsedMilliseconds
+                });
+            }
         }
         catch (Exception ex)
         {
