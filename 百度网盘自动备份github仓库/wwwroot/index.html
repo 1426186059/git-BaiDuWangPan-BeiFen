@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub → 百度网盘 自动备份工具</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --card-bg: #1a1d27;
+            --card-border: #2a2d3a;
+            --text: #e1e4e8;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --accent-hover: #79b8ff;
+            --success: #3fb950;
+            --success-bg: rgba(63,185,80,0.15);
+            --error: #f85149;
+            --error-bg: rgba(248,81,73,0.15);
+            --warning: #d2991d;
+            --warning-bg: rgba(210,153,29,0.15);
+            --input-bg: #0d1117;
+            --input-border: #30363d;
+            --radius: 12px;
+            --radius-sm: 8px;
+            --shadow: 0 4px 24px rgba(0,0,0,0.3);
+            --transition: 0.2s cubic-bezier(0.4,0,0.2,1);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6;
+            background-image:
+                radial-gradient(ellipse at 20% 20%, rgba(88,166,255,0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(63,185,80,0.04) 0%, transparent 50%);
+        }
+        .app-container { max-width: 900px; margin: 0 auto; padding: 32px 20px 60px; }
+        .header { text-align: center; padding: 36px 0 40px; }
+        .header .logo-icon { font-size: 48px; margin-bottom: 12px; display: inline-block; }
+        .header h1 {
+            font-size: 28px; font-weight: 700;
+            background: linear-gradient(135deg, var(--accent), #a371f7);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        }
+        .header .subtitle { color: var(--text-secondary); font-size: 14px; margin-top: 6px; }
+
+        .card {
+            background: var(--card-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius); padding: 24px; margin-bottom: 20px;
+            box-shadow: var(--shadow); transition: border-color var(--transition);
+        }
+        .card:hover { border-color: #3a3f4d; }
+        .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 10px; }
+        .card-title .icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+        .icon-github { background: rgba(88,166,255,0.15); }
+        .icon-baidu { background: rgba(163,113,247,0.15); }
+        .icon-config { background: rgba(210,153,29,0.15); }
+
+        .form-group { margin-bottom: 14px; }
+        .form-group:last-child { margin-bottom: 0; }
+        .form-label { display: block; font-size: 13px; font-weight: 500; color: var(--text-secondary); margin-bottom: 6px; }
+        .form-input {
+            width: 100%; padding: 10px 14px; background: var(--input-bg);
+            border: 1px solid var(--input-border); border-radius: var(--radius-sm);
+            color: var(--text); font-size: 14px; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            transition: border-color var(--transition), box-shadow var(--transition); outline: none;
+        }
+        .form-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.15); }
+        .form-input::placeholder { color: #484f58; }
+        .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
+        .form-row .form-group { flex: 1; min-width: 180px; }
+
+        .btn {
+            display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px;
+            border: none; border-radius: var(--radius-sm); font-size: 14px; font-weight: 600;
+            cursor: pointer; transition: all var(--transition); white-space: nowrap; font-family: inherit;
+        }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-primary:hover:not(:disabled) { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(88,166,255,0.3); }
+        .btn-success { background: var(--success); color: #fff; }
+        .btn-success:hover:not(:disabled) { filter: brightness(1.15); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(63,185,80,0.3); }
+        .btn-outline { background: transparent; border: 1px solid var(--input-border); color: var(--text); }
+        .btn-outline:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+        .btn-sm { padding: 6px 14px; font-size: 12px; }
+        .btn-lg { padding: 14px 32px; font-size: 16px; }
+        .btn-full { width: 100%; justify-content: center; }
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+
+        .progress-section { margin-top: 16px; }
+        .progress-bar-wrap { background: var(--input-bg); border-radius: 100px; height: 10px; overflow: hidden; margin-bottom: 8px; }
+        .progress-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #a371f7); border-radius: 100px; transition: width 0.4s ease; width: 0%; }
+        .progress-bar-fill.success { background: linear-gradient(90deg, var(--success), #56d364); }
+        .progress-text { font-size: 12px; color: var(--text-secondary); display: flex; justify-content: space-between; }
+
+        .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 100px; font-size: 12px; font-weight: 600; }
+        .status-badge.connected { background: var(--success-bg); color: var(--success); }
+        .status-badge.disconnected { background: var(--error-bg); color: var(--error); }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .status-dot.green { background: var(--success); }
+        .status-dot.red { background: var(--error); }
+
+        .log-console { background: var(--input-bg); border: 1px solid var(--input-border); border-radius: var(--radius-sm); padding: 14px; max-height: 280px; overflow-y: auto; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.8; }
+        .log-console .log-entry { display: flex; gap: 8px; align-items: flex-start; }
+        .log-time { color: #484f58; font-size: 11px; white-space: nowrap; }
+        .log-info { color: var(--accent); }
+        .log-success { color: var(--success); }
+        .log-error { color: var(--error); }
+        .log-warn { color: var(--warning); }
+
+        .info-text { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+
+        .steps { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+        .step { flex: 1; min-width: 120px; padding: 14px 16px; background: var(--card-bg); border: 2px solid var(--card-border); border-radius: var(--radius); text-align: center; transition: all var(--transition); }
+        .step .step-num { width: 28px; height: 28px; border-radius: 50%; background: var(--input-bg); border: 2px solid var(--card-border); display: flex; align-items: center; justify-content: center; margin: 0 auto 8px; font-size: 13px; font-weight: 700; color: var(--text-secondary); transition: all var(--transition); }
+        .step .step-label { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+        .step.active { border-color: var(--accent); }
+        .step.active .step-num { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .step.active .step-label { color: var(--accent); }
+        .step.done { border-color: var(--success); }
+        .step.done .step-num { background: var(--success); border-color: var(--success); color: #fff; }
+        .step.done .step-label { color: var(--success); }
+
+        .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: var(--radius-sm); font-size: 14px; font-weight: 500; color: #fff; z-index: 1000; animation: slideIn 0.3s ease; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+        .toast.success { background: var(--success); }
+        .toast.error { background: var(--error); }
+        .toast.info { background: var(--accent); }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+        .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid transparent; border-top-color: currentColor; border-radius: 50%; animation: spin 0.6s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .repo-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,0.04); transition: background 0.15s; cursor: pointer; font-size: 13px; }
+        .repo-item:hover { background: rgba(255,255,255,0.03); }
+        .repo-item:last-child { border-bottom: none; }
+        .repo-item input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); flex-shrink: 0; }
+        .repo-item .repo-name { color: var(--accent); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .repo-item .repo-meta { color: var(--text-secondary); font-size: 11px; margin-left: auto; white-space: nowrap; flex-shrink: 0; }
+        .repo-item .repo-private { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: rgba(210,153,29,0.15); color: var(--warning); flex-shrink: 0; }
+        .repo-item .repo-status { font-size: 11px; padding: 2px 8px; border-radius: 8px; flex-shrink: 0; }
+        .repo-item .repo-status.done { background: var(--success-bg); color: var(--success); }
+        .repo-item .repo-status.processing { background: rgba(88,166,255,0.15); color: var(--accent); }
+        .repo-item .repo-status.failed { background: var(--error-bg); color: var(--error); }
+        .repo-empty { text-align: center; padding: 30px; color: var(--text-secondary); font-size: 13px; }
+
+        @media (max-width: 640px) {
+            .app-container { padding: 16px 12px 40px; }
+            .header h1 { font-size: 22px; }
+            .card { padding: 16px; }
+            .form-row { flex-direction: column; }
+            .btn-group { flex-direction: column; }
+            .btn-lg { width: 100%; }
+        }
+        .log-console::-webkit-scrollbar { width: 6px; }
+        .log-console::-webkit-scrollbar-track { background: transparent; }
+        .log-console::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    </style>
+</head>
+<body>
+<div class="app-container">
+    <div class="header">
+        <div class="logo-icon">🚀</div>
+        <h1>GitHub → 百度网盘 自动备份</h1>
+        <p class="subtitle">.NET 10 后端驱动 · 服务端下载上传 · 无跨域问题</p>
+    </div>
+
+    <div class="steps" id="stepsIndicator">
+        <div class="step" id="step1"><div class="step-num">1</div><div class="step-label">配置授权</div></div>
+        <div class="step" id="step2"><div class="step-num">2</div><div class="step-label">选择仓库</div></div>
+        <div class="step" id="step3"><div class="step-num">3</div><div class="step-label">服务端备份</div></div>
+        <div class="step" id="step4"><div class="step-num">4</div><div class="step-label">完成</div></div>
+    </div>
+
+    <!-- 百度网盘配置 -->
+    <div class="card">
+        <div class="card-title">
+            <span class="icon icon-config">🔑</span> 百度网盘 API 配置
+            <span class="status-badge disconnected" id="authStatus"><span class="status-dot red"></span> 未授权</span>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">AppKey (client_id)</label>
+                <input type="text" class="form-input" id="appKey" value="" placeholder="从百度开放平台获取">
+            </div>
+            <div class="form-group">
+                <label class="form-label">SecretKey</label>
+                <input type="text" class="form-input" id="secretKey" value="" placeholder="应用的 SecretKey">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">上传目标路径</label>
+                <input type="text" class="form-input" id="uploadPath" value="/apps/xuke/github仓库备份/" placeholder="/apps/xuke/github仓库备份/">
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">授权回调地址（必须与百度开放平台配置的完全一致！）</label>
+            <input type="text" class="form-input" id="redirectUri" placeholder="http://localhost:64554/callback.html">
+        </div>
+        <div style="margin-top:6px;">
+            <span class="info-text">🔗 <a href="https://pan.baidu.com/union/console/home" target="_blank" style="color:var(--accent);text-decoration:none;border-bottom:1px dashed var(--accent);">百度网盘开放平台控制台</a>（获取 AppKey / SecretKey）</span>
+        </div>
+        <div style="margin-top:12px;">
+            <button class="btn btn-primary" id="authorizeBtn" onclick="authorizeBaidu()">🔗 授权百度网盘</button>
+            <span class="info-text" style="display:inline-block;margin-left:10px;" id="tokenHint"></span>
+        </div>
+        <div style="margin-top:8px;">
+            <span class="info-text">💡 当前实际地址：</span>
+            <code id="callbackUriDisplay" style="background:var(--input-bg);padding:2px 8px;border-radius:4px;font-size:12px;word-break:break-all;"></code>
+        </div>
+    </div>
+
+    <!-- GitHub 仓库 -->
+    <div class="card">
+        <div class="card-title">
+            <span class="icon icon-github">🐙</span> GitHub 仓库列表
+            <span id="repoCount" style="font-size:12px;color:var(--text-secondary);margin-left:auto;"></span>
+        </div>
+        <div class="form-row">
+            <div class="form-group" style="flex:2;">
+                <label class="form-label">GitHub 用户名</label>
+                <input type="text" class="form-input" id="githubUsername" placeholder="你的 GitHub 用户名">
+            </div>
+            <div class="form-group" style="flex:1;">
+                <label class="form-label">默认分支</label>
+                <input type="text" class="form-input" id="branchName" value="main" placeholder="main">
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">GitHub Token（私有仓库必填）</label>
+            <input type="text" class="form-input" id="githubToken" placeholder="github_pat_xxx（可选）">
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+            <button class="btn btn-primary" id="fetchReposBtn" disabled>🔍 获取仓库列表</button>
+            <button class="btn btn-outline btn-sm" id="selectAllBtn" style="display:none;">☑️ 全选</button>
+            <button class="btn btn-outline btn-sm" id="deselectAllBtn" style="display:none;">☐ 取消全选</button>
+        </div>
+        <div id="repoListContainer" style="max-height:350px;overflow-y:auto;display:none;background:var(--input-bg);border:1px solid var(--input-border);border-radius:var(--radius-sm);"></div>
+    </div>
+
+    <!-- 全部完成横幅 -->
+    <div id="allCompleteBanner" style="display:none;text-align:center;padding:20px;margin-bottom:20px;background:linear-gradient(135deg,rgba(63,185,80,0.15),rgba(163,113,247,0.15));border:2px solid var(--success);border-radius:var(--radius);">
+        <div style="font-size:36px;margin-bottom:8px;">🎉</div>
+        <div style="font-size:20px;font-weight:700;color:var(--success);margin-bottom:4px;">全部备份完成！</div>
+        <div style="font-size:13px;color:var(--text-secondary);" id="allCompleteTime"></div>
+    </div>
+
+    <!-- 执行操作 -->
+    <div class="card">
+        <div class="card-title"><span class="icon" style="background:rgba(63,185,80,0.15);">⚡</span> 执行操作</div>
+        <div class="btn-group">
+            <button class="btn btn-success btn-lg" id="batchBackupBtn" disabled onclick="batchBackupAll()">🚀 逐个备份选中仓库</button>
+            <button class="btn btn-outline" id="singleBackupBtn" disabled onclick="backupSingle()">🎯 备份单个仓库</button>
+            <button class="btn btn-outline btn-sm" id="forceBackupBtn" style="display:none;" onclick="forceBackupAll()">🔄 强制重新备份</button>
+        </div>
+        <div class="info-text" style="margin-top:8px;">
+            📁 临时下载目录：<code id="tempDirDisplay" style="background:var(--input-bg);padding:2px 8px;border-radius:4px;"></code>（上传完成后自动删除）
+        </div>
+        <div class="info-text" style="margin-top:4px;">
+            ☁️ 百度网盘路径：<code id="netdiskPathDisplay" style="background:var(--input-bg);padding:2px 8px;border-radius:4px;color:var(--accent);"></code>
+        </div>
+        <!-- 最近备份结果 -->
+        <div id="recentBackupResults" style="margin-top:10px;display:none;"></div>
+        <div class="progress-section" id="progressSection" style="display:none;">
+            <div class="progress-bar-wrap"><div class="progress-bar-fill" id="progressBar"></div></div>
+            <div class="progress-text"><span id="progressLabel">准备中...</span><span id="progressPercent">0%</span></div>
+            <!-- 当前仓库详细进度 -->
+            <div id="detailProgress" style="display:none; margin-top:12px; padding:12px; background:var(--input-bg); border-radius:var(--radius-sm); border:1px solid var(--input-border);">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                    <span id="detailStageIcon" style="font-size:20px;">📦</span>
+                    <span id="detailStageText" style="font-weight:600; font-size:14px;">准备中</span>
+                </div>
+                <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">
+                    <span style="font-family:monospace;" id="detailFileName">-</span>
+                </div>
+                <div class="progress-bar-wrap" style="height:6px;">
+                    <div class="progress-bar-fill" id="detailProgressBar" style="height:100%;width:0%;"></div>
+                </div>
+                <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;" id="detailProgressText">-</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 日志 -->
+    <div class="card">
+        <div class="card-title">
+            <span class="icon" style="background:rgba(139,148,158,0.15);">📋</span> 运行日志
+            <button class="btn btn-sm btn-outline" id="clearLogBtn" style="margin-left:auto;">清空</button>
+        </div>
+        <div class="log-console" id="logConsole"></div>
+    </div>
+</div>
+
+<script>
+// ==================== 全局状态 ====================
+const DEFAULT_UPLOAD_PATH = '/apps/xuke/github仓库备份/';
+const state = {
+    appKey: '', secretKey: '', accessToken: '', refreshToken: '',
+    expiresAt: 0, uploadPath: DEFAULT_UPLOAD_PATH,
+    githubUsername: '', branch: 'main', githubToken: '',
+    repoList: [], isAuthorized: false, isRunning: false,
+    backupRecords: {}, // { "owner/repo/branch": "2024-07-04T..." }
+    allComplete: false,
+    allCompleteTime: null,
+    totalRepoCount: 0
+};
+const $ = s => document.querySelector(s);
+const dom = {};
+
+// ==================== 日志 / Toast ====================
+function log(msg, type='info') {
+    const t = new Date().toTimeString().slice(0,8);
+    const e = document.createElement('div');
+    e.className='log-entry';
+    e.innerHTML=`<span class="log-time">${t}</span> <span class="log-${type}">${msg}</span>`;
+    dom.logConsole.appendChild(e);
+    dom.logConsole.scrollTop = dom.logConsole.scrollHeight;
+}
+function toast(msg, type='info') {
+    const el = document.createElement('div');
+    el.className=`toast ${type}`; el.textContent=msg;
+    document.body.appendChild(el);
+    setTimeout(()=>{el.style.opacity='0';el.style.transition='opacity 0.3s';setTimeout(()=>el.remove(),300);},3000);
+}
+
+// ==================== 步骤/进度 ====================
+function updateStep(n) {
+    dom.steps.forEach((s,i)=>{
+        s.classList.remove('active','done');
+        if(i+1<n) s.classList.add('done');
+        if(i+1===n) s.classList.add('active');
+    });
+}
+function showProgress(v=true) { dom.progressSection.style.display = v?'block':'none'; }
+function updateProgress(pct, label) {
+    const p = Math.min(100,Math.max(0,Math.round(pct)));
+    dom.progressBar.style.width=p+'%'; dom.progressPercent.textContent=p+'%';
+    if(label) dom.progressLabel.textContent=label;
+    if(p===100) dom.progressBar.classList.add('success'); else dom.progressBar.classList.remove('success');
+}
+
+// ==================== 按钮状态 ====================
+function updateButtons() {
+    const hasToken = !!state.accessToken;
+    const hasSelected = state.repoList.some(r=>r.selected);
+    dom.authorizeBtn.disabled = false;
+    dom.fetchReposBtn.disabled = !state.githubUsername.trim();
+    dom.batchBackupBtn.disabled = !hasToken || !hasSelected || state.isRunning;
+    dom.singleBackupBtn.disabled = !hasToken || !hasSelected || state.isRunning;
+    if(state.isAuthorized) {
+        dom.authStatus.className='status-badge connected';
+        dom.authStatus.innerHTML='<span class="status-dot green"></span> 已授权';
+    } else {
+        dom.authStatus.className='status-badge disconnected';
+        dom.authStatus.innerHTML='<span class="status-dot red"></span> 未授权';
+    }
+    const cnt = state.repoList.filter(r=>r.selected).length;
+    if(cnt>0) dom.batchBackupBtn.innerHTML=`🚀 逐个备份选中仓库 (${cnt}个)`;
+    else dom.batchBackupBtn.innerHTML='🚀 逐个备份选中仓库';
+    if(cnt===1) {
+        const r = state.repoList.find(r=>r.selected);
+        dom.singleBackupBtn.style.display='inline-flex';
+        dom.singleBackupBtn.innerHTML=`🎯 备份 ${r.name}`;
+    } else {
+        dom.singleBackupBtn.style.display=cnt>0?'inline-flex':'none';
+        dom.singleBackupBtn.innerHTML='🎯 备份单个仓库（请只选1个）';
+    }
+}
+
+// ==================== 存储 ====================
+function saveConfig() {
+    try {
+        const c = { appKey:state.appKey, secretKey:state.secretKey, uploadPath:state.uploadPath, githubToken:state.githubToken, accessToken:state.accessToken, refreshToken:state.refreshToken, expiresAt:state.expiresAt, githubUsername:state.githubUsername };
+        localStorage.setItem('github_baidu_backup', JSON.stringify(c));
+    } catch(e) {}
+}
+
+// ==================== 百度授权 ====================
+function authorizeBaidu() {
+    state.appKey = dom.appKey.value.trim();
+    state.secretKey = dom.secretKey.value.trim();
+    if(!state.appKey||!state.secretKey) { toast('❌ 请填写 AppKey 和 SecretKey','error'); return; }
+    saveConfig();
+
+    // CSRF 防护：生成随机 state 参数
+    const oauthState = crypto.randomUUID();
+    sessionStorage.setItem('baidu_oauth_state', oauthState);
+
+    // 使用手动设置或自动检测的回调地址
+    const redirectUri = dom.redirectUri.value.trim() || (window.location.origin + '/callback.html');
+    const authUrl = 'https://openapi.baidu.com/oauth/2.0/authorize?'+
+        'response_type=code&client_id='+encodeURIComponent(state.appKey)+
+        '&redirect_uri='+encodeURIComponent(redirectUri)+
+        '&scope=basic,netdisk&display=page'+
+        '&state='+encodeURIComponent(oauthState);
+    log('🔗 正在跳转到百度授权页面...');
+    log('💡 回调地址: '+redirectUri);
+    window.location.href = authUrl;
+}
+
+async function exchangeToken(code) {
+    log('🔄 正在换取 access_token...');
+    // 使用已保存的回调地址
+    var redirectUri = dom.redirectUri.value.trim() || (window.location.origin + '/callback.html');
+    try {
+        const resp = await fetch('/api/auth/baidu', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+                clientId: state.appKey, clientSecret: state.secretKey,
+                code: code, redirectUri: redirectUri
+            })
+        });
+        const data = await resp.json();
+        if(data.success) {
+            onTokenReceived(data.data);
+        } else {
+            log('❌ '+data.error,'error'); toast('❌ 授权失败','error');
+        }
+    } catch(err) {
+        log('❌ 换取Token失败: '+err.message,'error');
+    }
+}
+
+function onTokenReceived(tokenData) {
+    state.accessToken = tokenData.accessToken;
+    state.refreshToken = tokenData.refreshToken || '';
+    state.expiresAt = Date.now() + (tokenData.expiresIn || 0) * 1000;
+    state.isAuthorized = true;
+    const days = Math.round((tokenData.expiresIn||0)/86400);
+    dom.tokenHint.textContent = '✅ Token: '+state.accessToken.substring(0,12)+'... (有效期'+days+'天)';
+    log('✅ 授权成功！有效期约 '+days+' 天','success');
+    toast('✅ 授权成功','success');
+    saveConfig(); updateButtons();
+}
+
+async function refreshAccessToken() {
+    if(!state.refreshToken) return false;
+    log('🔄 Token即将过期，正在自动刷新...');
+    try {
+        const resp = await fetch('/api/auth/refresh', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+                refreshToken: state.refreshToken,
+                clientId: state.appKey,
+                clientSecret: state.secretKey
+            })
+        });
+        const data = await resp.json();
+        if(data.success) {
+            onTokenReceived(data.data);
+            log('✅ Token刷新成功','success');
+            return true;
+        } else {
+            log('⚠️ Token刷新失败: '+data.error+', 请重新授权','warn');
+            return false;
+        }
+    } catch(err) {
+        log('⚠️ Token刷新异常: '+err.message,'warn');
+        return false;
+    }
+}
+
+async function ensureValidToken() {
+    if(!state.accessToken) return false;
+    // 如果剩不到1天就过期，提前刷新
+    const oneDay = 24 * 60 * 60 * 1000;
+    if(state.refreshToken && Date.now() > state.expiresAt - oneDay) {
+        return await refreshAccessToken();
+    }
+    return !!state.accessToken;
+}
+
+// ==================== 备份记录 ====================
+async function loadBackupRecords() {
+    try {
+        const resp = await fetch('/api/backup/records');
+        const data = await resp.json();
+        if(data.success && data.data) {
+            state.backupRecords = data.data.backedUp || {};
+            state.allComplete = data.data.allComplete || false;
+            state.allCompleteTime = data.data.allCompleteTime || null;
+            state.totalRepoCount = data.data.totalRepoCount || 0;
+            checkAllCompleteBanner();
+            renderRepoList();
+        }
+    } catch(err) {
+        log('⚠️ 加载备份记录失败: '+err.message, 'warn');
+    }
+}
+
+function checkAllCompleteBanner() {
+    const banner = $('#allCompleteBanner');
+    const forceBtn = $('#forceBackupBtn');
+    if(state.allComplete && state.allCompleteTime) {
+        banner.style.display = 'block';
+        const d = new Date(state.allCompleteTime);
+        $('#allCompleteTime').textContent = '完成时间：' + d.toLocaleString('zh-CN');
+        forceBtn.style.display = 'inline-flex';
+    } else {
+        banner.style.display = 'none';
+        forceBtn.style.display = 'none';
+    }
+}
+
+function isRepoBackedUp(owner, repo, branch) {
+    const key = owner + '/' + repo + '/' + branch;
+    return !!state.backupRecords[key];
+}
+
+async function saveTotalRepoCount(count) {
+    try {
+        await fetch('/api/backup/records/settotal', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ totalCount: count })
+        });
+    } catch(e) {}
+}
+
+async function resetBackupRecords() {
+    try {
+        await fetch('/api/backup/records/reset', { method:'POST' });
+        state.backupRecords = {};
+        state.allComplete = false;
+        state.allCompleteTime = null;
+        state.totalRepoCount = 0;
+        checkAllCompleteBanner();
+        // 清除仓库的 done 状态
+        state.repoList.forEach(r => { if(r.status==='done') r.status=''; });
+        renderRepoList();
+        log('🔄 备份记录已重置', 'info');
+        toast('✅ 备份记录已重置', 'success');
+    } catch(err) {
+        log('❌ 重置失败: '+err.message, 'error');
+    }
+}
+
+// ==================== GitHub 仓库 ====================
+async function fetchAllRepos() {
+    const username = state.githubUsername.trim();
+    if(!username) { toast('⚠️ 请输入 GitHub 用户名','error'); return; }
+    dom.fetchReposBtn.disabled=true;
+    dom.fetchReposBtn.innerHTML='<span class="spinner"></span> 获取中...';
+    dom.repoListContainer.style.display='block';
+    dom.repoListContainer.innerHTML='<div class="repo-empty"><span class="spinner"></span> 正在获取仓库列表...</div>';
+    log('🐙 正在获取 '+username+' 的仓库列表...');
+    try {
+        const resp = await fetch('/api/github/repos/'+encodeURIComponent(username)+'?token='+encodeURIComponent(state.githubToken||''));
+        const data = await resp.json();
+        if(data.success) {
+            state.repoList = data.data.map(r=>({
+                owner:r.owner, name:r.name, branch:r.defaultBranch||state.branch,
+                selected:true, private:r.privateRepo, size:r.size||0,
+                description:r.description||'', status:''
+            }));
+            // 根据备份记录标记已备份的仓库
+            state.repoList.forEach(r => {
+                if(isRepoBackedUp(r.owner, r.name, r.branch)) {
+                    r.status = 'done';
+                    r.selected = false; // 已备份的默认不勾选
+                }
+            });
+            log('✅ 共获取到 '+state.repoList.length+' 个仓库','success');
+            // 保存总数到后端
+            await saveTotalRepoCount(state.repoList.length);
+            renderRepoList(); updateButtons(); saveConfig();
+        } else throw new Error(data.error);
+    } catch(err) {
+        log('❌ 获取失败: '+err.message,'error');
+        toast('❌ '+err.message,'error');
+        dom.repoListContainer.innerHTML='<div class="repo-empty">❌ '+err.message+'</div>';
+    } finally {
+        dom.fetchReposBtn.disabled=false;
+        dom.fetchReposBtn.innerHTML='🔍 获取仓库列表';
+    }
+}
+
+function renderRepoList() {
+    const c = dom.repoListContainer;
+    c.style.display='block';
+    if(state.repoList.length===0) { c.innerHTML='<div class="repo-empty">😕 没有找到仓库</div>'; return; }
+    dom.repoCount.textContent='共 '+state.repoList.length+' 个仓库';
+    dom.selectAllBtn.style.display='inline-flex';
+    dom.deselectAllBtn.style.display='inline-flex';
+    c.innerHTML = state.repoList.map((r,i)=>`
+        <div class="repo-item" data-idx="${i}" onclick="toggleRow(${i},event)">
+            <input type="checkbox" ${r.selected?'checked':''} onclick="event.stopPropagation();toggleRepo(${i},this.checked)">
+            <span class="repo-name" title="${r.owner}/${r.name}">${r.owner}/${r.name}</span>
+            ${r.private?'<span class="repo-private">私</span>':''}
+            <span class="repo-meta">${r.description?r.description.substring(0,30):''}</span>
+            <select class="form-input" style="width:80px;padding:2px 4px;font-size:11px;flex-shrink:0;"
+                onclick="event.stopPropagation()" onchange="changeBranch(${i},this.value)">
+                <option value="${r.branch}" selected>${r.branch}</option>
+                <option value="main">main</option><option value="master">master</option>
+            </select>
+            ${r.status?`<span class="repo-status ${r.status}">${statusText(r.status)}</span>`:''}
+        </div>`).join('');
+}
+
+function statusText(s) { return {done:'✅',processing:'⏳',failed:'❌',skipped:'⚠️'}[s]||s; }
+window.toggleRepo = (i,v)=>{state.repoList[i].selected=v;updateButtons();};
+window.toggleRow = (i,e)=>{state.repoList[i].selected=!state.repoList[i].selected;updateButtons();renderRepoList();};
+window.changeBranch = (i,b)=>{state.repoList[i].branch=b;};
+function selectAll(){state.repoList.forEach(r=>r.selected=true);renderRepoList();updateButtons();}
+function deselectAll(){state.repoList.forEach(r=>r.selected=false);renderRepoList();updateButtons();}
+
+// ==================== 备份操作 ====================
+async function backupSingle() {
+    const sel = state.repoList.filter(r=>r.selected);
+    if(sel.length!==1) { toast('⚠️ 请只勾选一个仓库','error'); return; }
+    const repo = sel[0];
+    await doBackup([{owner:repo.owner, repo:repo.name, branch:repo.branch}]);
+}
+
+async function batchBackupAll() {
+    const sel = state.repoList.filter(r=>r.selected);
+    if(sel.length===0) { toast('⚠️ 请勾选仓库','error'); return; }
+    if(!await ensureValidToken()) { toast('❌ 请先授权百度网盘','error'); return; }
+    const repos = sel.map(r=>({owner:r.owner, repo:r.name, branch:r.branch}));
+    await doBackup(repos);
+}
+
+async function forceBackupAll() {
+    if(!await ensureValidToken()) { toast('❌ 请先授权百度网盘','error'); return; }
+    // 先重置记录
+    await fetch('/api/backup/records/reset', { method:'POST' });
+    state.backupRecords = {};
+    state.allComplete = false;
+    state.allCompleteTime = null;
+    checkAllCompleteBanner();
+    // 全选所有仓库
+    state.repoList.forEach(r => { r.selected = true; r.status = ''; });
+    renderRepoList();
+    // 开始备份
+    const repos = state.repoList.map(r=>({owner:r.owner, repo:r.name, branch:r.branch}));
+    await saveTotalRepoCount(state.repoList.length);
+    await doBackup(repos);
+}
+
+async function doBackup(repos) {
+    if(state.isRunning) return;
+    if(!await ensureValidToken()) { toast('❌ Token无效，请重新授权','error'); return; }
+    state.isRunning = true; updateButtons();
+    showProgress(true); updateProgress(0, '[0/'+repos.length+'] 开始备份...');
+    dom.detailProgress.style.display = 'none';
+    log('🚀 ========== 开始备份 '+repos.length+' 个仓库 ==========');
+
+    // 标记当前步骤
+    updateStep(3);
+
+    var ok = 0, fail = 0, skip = 0;
+    for(var i = 0; i < repos.length; i++) {
+        var r = repos[i];
+        var item = state.repoList.find(x=>x.owner===r.owner&&x.name===r.repo);
+        if(item) item.status='processing';
+        renderRepoList();
+
+        var pct = Math.round((i / repos.length) * 100);
+        updateProgress(pct, '['+(i+1)+'/'+repos.length+'] '+r.owner+'/'+r.repo);
+        log('⏳ ['+(i+1)+'/'+repos.length+'] '+r.owner+'/'+r.repo+' → '+r.repo+'.zip');
+
+        // 显示详细进度面板
+        dom.detailProgress.style.display = 'block';
+        dom.detailStageIcon.textContent = '📦';
+        dom.detailStageText.textContent = '准备中';
+        dom.detailFileName.textContent = r.repo + '.zip';
+        dom.detailProgressBar.style.width = '0%';
+        dom.detailProgressText.textContent = '0%';
+
+        // 发起备份请求
+        var backupPromise = fetch('/api/backup/single', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+                owner: r.owner, repo: r.repo, branch: r.branch,
+                accessToken: state.accessToken, gitHubToken: state.githubToken||null,
+                uploadPath: state.uploadPath
+            })
+        });
+
+        // 轮询进度（每 500ms）
+        var pollInterval = setInterval(async function() {
+            try {
+                var pr = await fetch('/api/backup/progress?owner='+
+                    encodeURIComponent(r.owner)+'&repo='+encodeURIComponent(r.repo)+
+                    '&branch='+encodeURIComponent(r.branch));
+                var pd = await pr.json();
+                if(pd.success && pd.data) {
+                    var p = pd.data;
+                    updateDetailProgress(p);
+                    // 更新仓库项的迷你状态
+                    if(item) {
+                        var stageEmoji = p.stage==='downloading'?'📥':p.stage==='uploading'?'📤':p.stage==='done'?'✅':p.stage==='failed'?'❌':'⏳';
+                        if(p.stage==='downloading') item.status = 'processing';
+                    }
+                    renderRepoList();
+                }
+            } catch(e) {}
+        }, 500);
+
+        // 等待备份完成
+        try {
+            var resp = await backupPromise;
+            clearInterval(pollInterval);
+            var data = await resp.json();
+            if(data.success && data.data.success) {
+                ok++;
+                if(item) item.status='done';
+                var bKey = r.owner + '/' + r.repo + '/' + r.branch;
+                state.backupRecords[bKey] = new Date().toISOString();
+                var filePath = data.data.filePath || (state.uploadPath + r.repo + '.zip');
+                log('✅ '+r.owner+'/'+r.repo+' 备份成功 → '+filePath,'success');
+                addBackupResult(r.owner+'/'+r.repo, true, filePath);
+                updateProgress(Math.round((ok+fail)/repos.length*100),
+                    '['+(i+1)+'/'+repos.length+'] ✅ '+r.owner+'/'+r.repo);
+            } else {
+                var errMsg = (data.data && data.data.message) || data.error || '未知错误';
+                // 判断是否为跳过的仓库（无内容/空仓库）
+                if(errMsg.includes('无可用内容') || errMsg.includes('仓库或分支不存在')) {
+                    skip++;
+                    if(item) item.status='skipped';
+                    log('⚠️ '+r.owner+'/'+r.repo+': '+errMsg,'warn');
+                    updateDetailProgress({stage:'failed', fileName:r.repo+'.zip', message:'⚠️ '+errMsg, isCompleted:true, success:false});
+                } else {
+                    fail++;
+                    if(item) item.status='failed';
+                    log('❌ '+r.owner+'/'+r.repo+': '+errMsg,'error');
+                    addBackupResult(r.owner+'/'+r.repo, false, errMsg);
+                    updateDetailProgress({stage:'failed', fileName:r.repo+'.zip', message:'❌ '+errMsg, isCompleted:true, success:false});
+                }
+            }
+        } catch(err) {
+            clearInterval(pollInterval);
+            var eMsg = err.message || ''+err;
+            if(eMsg.includes('无可用内容') || eMsg.includes('仓库或分支不存在')) {
+                skip++;
+                if(item) item.status='skipped';
+                log('⚠️ '+r.owner+'/'+r.repo+': '+eMsg,'warn');
+            } else {
+                fail++;
+                if(item) item.status='failed';
+                log('❌ '+r.owner+'/'+r.repo+': '+eMsg,'error');
+                addBackupResult(r.owner+'/'+r.repo, false, eMsg);
+            }
+            updateDetailProgress({stage:'failed', fileName:r.repo+'.zip', message:'⚠️ '+eMsg, isCompleted:true, success:false});
+        }
+
+        renderRepoList();
+        // 仓库之间延迟 1 秒
+        if(i < repos.length - 1) await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    dom.detailProgress.style.display = 'none';
+    updateProgress(100, '完成! 成功 '+ok+' / 失败 '+fail+(skip>0?' / 跳过 '+skip:''));
+    dom.progressBar.classList.add('success');
+    updateStep(4);
+    toast('🎉 成功 '+ok+' / 失败 '+fail+(skip>0?' / 跳过 '+skip:''), fail===0?'success':'error');
+    log('========== 备份完成: 成功 '+ok+' / 失败 '+fail+(skip>0?' / 跳过 '+skip:'')+' ==========', fail===0?'success':'info');
+
+    state.isRunning = false;
+    renderRepoList(); updateButtons();
+
+    // 重新加载备份记录，检查是否全部完成
+    await loadBackupRecords();
+    if(state.allComplete) {
+        log('🎉🎉🎉 全部仓库备份完成！','success');
+        toast('🎉 全部备份完成！','success');
+    }
+}
+
+// 更新详细进度面板
+function updateDetailProgress(p) {
+    if(!p) return;
+    dom.detailFileName.textContent = p.fileName || '-';
+
+    // 阶段图标和文字
+    var stageMap = {
+        'downloading':  {icon:'📥', text:'正在下载 ZIP'},
+        'uploading':    {icon:'📤', text:'正在上传到百度网盘'},
+        'done':         {icon:'✅', text:'备份完成'},
+        'failed':       {icon:'❌', text:'备份失败'},
+        'md5':          {icon:'🔢', text:'计算文件校验...'},
+        'completing':   {icon:'📝', text:'完成上传...'},
+        'idle':         {icon:'⏳', text:'等待中...'}
+    };
+    var si = stageMap[p.stage] || {icon:'📦', text:p.stage};
+    dom.detailStageIcon.textContent = si.icon;
+    dom.detailStageText.textContent = si.text;
+
+    // 进度条：下载阶段用下载百分比，上传阶段用上传百分比
+    var barPct = 0;
+    if(p.stage === 'downloading') barPct = p.downloadPercent || 0;
+    else if(p.stage === 'uploading') barPct = p.uploadPercent || 0;
+    else if(p.stage === 'done') barPct = 100;
+    dom.detailProgressBar.style.width = barPct + '%';
+    if(p.stage==='done') dom.detailProgressBar.classList.add('success');
+    else dom.detailProgressBar.classList.remove('success');
+
+    // 详细文字
+    dom.detailProgressText.textContent = p.message || (barPct + '%');
+}
+
+// ==================== 备份结果显示 ====================
+var _backupResults = [];
+
+function addBackupResult(repo, success, path) {
+    _backupResults.unshift({ repo: repo, success: success, path: path, time: new Date().toLocaleString('zh-CN') });
+    if(_backupResults.length > 20) _backupResults.pop();
+    renderBackupResults();
+}
+
+function renderBackupResults() {
+    var el = $('#recentBackupResults');
+    if(_backupResults.length === 0) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.innerHTML = '<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-secondary);">📂 最近备份结果（百度网盘路径）</div>' +
+        _backupResults.map(function(r) {
+            return '<div style="font-size:12px;padding:6px 10px;margin-bottom:4px;background:var(--input-bg);border-radius:6px;display:flex;align-items:center;gap:8px;">' +
+                '<span>' + (r.success ? '✅' : '❌') + '</span>' +
+                '<span style="color:var(--accent);font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + r.repo + '">' + r.repo + '</span>' +
+                (r.success
+                    ? '<span style="color:var(--success);font-family:monospace;font-size:11px;" title="' + r.path + '">☁️ ' + r.path + '</span>'
+                    : '<span style="color:var(--error);font-size:11px;">失败</span>') +
+                '</div>';
+        }).join('');
+}
+
+// ==================== 初始化 ====================
+function init() {
+    // DOM引用
+    ['appKey','secretKey','uploadPath','githubUsername','branchName','githubToken',
+     'fetchReposBtn','selectAllBtn','deselectAllBtn','repoListContainer','repoCount',
+     'authorizeBtn','batchBackupBtn','singleBackupBtn','forceBackupBtn',
+     'progressSection','progressBar','progressLabel','progressPercent',
+     'detailProgress','detailStageIcon','detailStageText','detailFileName',
+     'detailProgressBar','detailProgressText',
+    'logConsole','clearLogBtn','authStatus','tokenHint','steps',
+     'redirectUri','callbackUriDisplay','tempDirDisplay','netdiskPathDisplay',
+     'allCompleteBanner','allCompleteTime','recentBackupResults'].forEach(id=>dom[id]=$('#'+id));
+    dom.steps=document.querySelectorAll('.step');
+
+    // 自动检测并提示回调地址
+    var actualCallback = window.location.origin + '/callback.html';
+    if (!dom.redirectUri.value) dom.redirectUri.value = actualCallback;
+    dom.callbackUriDisplay.textContent = actualCallback;
+    log('🔗 授权回调地址: ' + actualCallback, 'info');
+
+    // 显示网盘上传路径
+    dom.netdiskPathDisplay.textContent = state.uploadPath;
+
+    // 获取临时下载目录
+    fetch('/api/tempdir')
+        .then(r=>r.json())
+        .then(d=>{ dom.tempDirDisplay.textContent = d.tempDir; })
+        .catch(()=>{ dom.tempDirDisplay.textContent = '未知'; });
+
+    // ==================== 事件 ====================
+    dom.clearLogBtn.addEventListener('click',()=>{dom.logConsole.innerHTML='';log('📋 日志已清空');});
+    dom.fetchReposBtn.addEventListener('click', fetchAllRepos);
+    dom.selectAllBtn.addEventListener('click', selectAll);
+    dom.deselectAllBtn.addEventListener('click', deselectAll);
+    dom.authorizeBtn.addEventListener('click', authorizeBaidu);
+    dom.forceBackupBtn.addEventListener('click', forceBackupAll);
+
+    // 输入事件
+    dom.appKey.addEventListener('input',()=>{state.appKey=dom.appKey.value.trim();updateButtons();});
+    dom.appKey.addEventListener('blur', saveConfig);
+    dom.secretKey.addEventListener('input',()=>{state.secretKey=dom.secretKey.value.trim();updateButtons();});
+    dom.secretKey.addEventListener('blur',saveConfig);
+    dom.uploadPath.addEventListener('input',()=>{state.uploadPath=dom.uploadPath.value.trim();dom.netdiskPathDisplay.textContent=state.uploadPath;});
+    dom.uploadPath.addEventListener('blur',saveConfig);
+    dom.githubUsername.addEventListener('input',()=>{state.githubUsername=dom.githubUsername.value.trim();updateButtons();});
+    dom.githubUsername.addEventListener('blur',saveConfig);
+    dom.branchName.addEventListener('input',()=>{state.branch=dom.branchName.value.trim()||'main';});
+    dom.githubToken.addEventListener('input',()=>{state.githubToken=dom.githubToken.value.trim();});
+    dom.githubToken.addEventListener('blur',saveConfig);
+
+    // 读取状态
+    state.appKey=dom.appKey.value.trim();
+    state.secretKey=dom.secretKey.value.trim();
+    state.uploadPath=dom.uploadPath.value.trim()||DEFAULT_UPLOAD_PATH;
+
+    // 从localStorage恢复
+    try {
+        const raw = localStorage.getItem('github_baidu_backup');
+        if(raw) {
+            const c = JSON.parse(raw);
+            if(c.appKey){state.appKey=c.appKey;dom.appKey.value=c.appKey;}
+            if(c.secretKey){state.secretKey=c.secretKey;dom.secretKey.value=c.secretKey;}
+            if(c.uploadPath){state.uploadPath=c.uploadPath;dom.uploadPath.value=c.uploadPath;dom.netdiskPathDisplay.textContent=c.uploadPath;}
+            if(c.githubUsername){state.githubUsername=c.githubUsername;dom.githubUsername.value=c.githubUsername;}
+            if(c.githubToken){state.githubToken=c.githubToken;dom.githubToken.value=c.githubToken;}
+            if(c.accessToken){
+                state.accessToken=c.accessToken;state.isAuthorized=true;
+                state.refreshToken=c.refreshToken||'';
+                state.expiresAt=c.expiresAt||0;
+                const remDays = Math.max(0, Math.round((state.expiresAt - Date.now())/86400000));
+                dom.tokenHint.textContent='✅ Token: '+c.accessToken.substring(0,10)+'... (剩余'+remDays+'天)';
+                if(state.refreshToken && Date.now() > state.expiresAt - 86400000) {
+                    refreshAccessToken();
+                }
+            }
+        }
+    } catch(e) {}
+
+    // 检查OAuth回调返回的code
+    const authCode = localStorage.getItem('baidu_auth_code');
+    if(authCode) {
+        localStorage.removeItem('baidu_auth_code');
+        exchangeToken(authCode);
+    }
+    const authErr = localStorage.getItem('baidu_auth_error');
+    if(authErr) {
+        localStorage.removeItem('baidu_auth_error');
+        log('❌ 授权失败: '+authErr,'error');
+        toast('❌ 授权失败','error');
+    }
+
+    updateButtons(); updateStep(1);
+    log('🚀 .NET 10 备份工具已就绪');
+    log('💡 服务端直接下载并上传，无需跨域处理','info');
+    if(state.appKey) log('🔑 AppKey: '+state.appKey.substring(0,8)+'...','success');
+    log('📌 步骤: ①授权百度网盘 → ②获取仓库列表 → ③选择仓库 → ④一键备份','info');
+
+    // 加载备份记录
+    loadBackupRecords();
+}
+init();
+</script>
+</body>
+</html>

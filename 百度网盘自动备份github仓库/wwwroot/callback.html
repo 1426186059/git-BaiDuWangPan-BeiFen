@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>授权回调 - GitHub → 百度网盘</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #0f1117;
+            color: #e1e4e8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        .msg {
+            text-align: center;
+            font-size: 18px;
+        }
+        .spinner {
+            display: inline-block;
+            width: 32px; height: 32px;
+            border: 3px solid rgba(88,166,255,0.2);
+            border-top-color: #58a6ff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="msg">
+        <div class="spinner" style="margin:0 auto 16px;"></div>
+        <p>正在处理授权...</p>
+        <p style="font-size:13px;margin-top:16px;color:#8b949e;">
+            🔗 <a href="https://pan.baidu.com/union/console/home" target="_blank" style="color:#58a6ff;text-decoration:none;">百度网盘开放平台控制台</a>
+        </p>
+    </div>
+    <script>
+    (function() {
+        var params = new URLSearchParams(window.location.search);
+        var code = params.get('code');
+        var state = params.get('state');
+        var savedState = sessionStorage.getItem('baidu_oauth_state');
+
+        // CSRF 防护：校验 state 参数
+        if (savedState && state !== savedState) {
+            try { localStorage.setItem('baidu_auth_error', 'CSRF校验失败：state不匹配'); } catch(e) {}
+            sessionStorage.removeItem('baidu_oauth_state');
+            window.location.replace('/');
+            return;
+        }
+        sessionStorage.removeItem('baidu_oauth_state');
+
+        if (code) {
+            try { localStorage.setItem('baidu_auth_code', code); } catch(e) {}
+            window.location.replace('/');
+        } else {
+            var err = params.get('error_description') || params.get('error') || '未获取到授权码';
+            try { localStorage.setItem('baidu_auth_error', err); } catch(e) {}
+            window.location.replace('/');
+        }
+    })();
+    </script>
+</body>
+</html>
