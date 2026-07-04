@@ -27,7 +27,7 @@
 ### 前置条件
 
 - [.NET 8/10 SDK](https://dotnet.microsoft.com/download)
-- 百度网盘开放平台 AppKey（如已内置则可跳过）
+- 百度网盘开放平台 AppKey 和 SecretKey（需前往开放平台创建应用获取）
 
 ### 运行
 
@@ -40,7 +40,7 @@ dotnet run
 
 ### 使用步骤
 
-1. **配置百度网盘** - 填写 AppKey/SecretKey（已内置默认值）
+1. **配置百度网盘** - 填写你的 AppKey/SecretKey
 2. **授权百度网盘** - 点击按钮 → 跳转百度授权 → 自动返回
 3. **输入 GitHub 用户名** → 点击「获取仓库列表」
 4. **勾选要备份的仓库** → 点击「逐个备份选中仓库」
