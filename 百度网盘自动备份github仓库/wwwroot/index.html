@@ -711,8 +711,9 @@ async function doBackup(repos) {
                 var bKey = r.owner + '/' + r.repo + '/' + r.branch;
                 state.backupRecords[bKey] = new Date().toISOString();
                 var filePath = data.data.filePath || (state.uploadPath + r.repo + '.zip');
-                log('✅ '+r.owner+'/'+r.repo+' 备份成功 → '+filePath,'success');
-                addBackupResult(r.owner+'/'+r.repo, true, filePath);
+                var fileSize = data.data.fileSize || 0;
+                log('✅ '+r.owner+'/'+r.repo+' 备份成功 (' + formatBytes(fileSize) + ') → '+filePath,'success');
+                addBackupResult(r.owner+'/'+r.repo, true, filePath, fileSize);
                 updateProgress(Math.round((ok+fail)/repos.length*100),
                     '['+(i+1)+'/'+repos.length+'] ✅ '+r.owner+'/'+r.repo);
             } else {
@@ -805,8 +806,16 @@ function updateDetailProgress(p) {
 // ==================== 备份结果显示 ====================
 var _backupResults = [];
 
-function addBackupResult(repo, success, path) {
-    _backupResults.unshift({ repo: repo, success: success, path: path, time: new Date().toLocaleString('zh-CN') });
+function formatBytes(bytes) {
+    if(!bytes || bytes <= 0) return '';
+    if(bytes < 1024) return bytes + ' B';
+    if(bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+    if(bytes < 1024*1024*1024) return (bytes/(1024*1024)).toFixed(1) + ' MB';
+    return (bytes/(1024*1024*1024)).toFixed(2) + ' GB';
+}
+
+function addBackupResult(repo, success, path, fileSize) {
+    _backupResults.unshift({ repo: repo, success: success, path: path, fileSize: fileSize||0, time: new Date().toLocaleString('zh-CN') });
     if(_backupResults.length > 20) _backupResults.pop();
     renderBackupResults();
 }
@@ -815,11 +824,12 @@ function renderBackupResults() {
     var el = $('#recentBackupResults');
     if(_backupResults.length === 0) { el.style.display = 'none'; return; }
     el.style.display = 'block';
-    el.innerHTML = '<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-secondary);">📂 最近备份结果（百度网盘路径）</div>' +
+    el.innerHTML = '<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text-secondary);">📂 最近备份结果</div>' +
         _backupResults.map(function(r) {
+            var sizeStr = r.fileSize > 0 ? ' <span style="color:var(--text-secondary);font-size:10px;">' + formatBytes(r.fileSize) + '</span>' : '';
             return '<div style="font-size:12px;padding:6px 10px;margin-bottom:4px;background:var(--input-bg);border-radius:6px;display:flex;align-items:center;gap:8px;">' +
                 '<span>' + (r.success ? '✅' : '❌') + '</span>' +
-                '<span style="color:var(--accent);font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + r.repo + '">' + r.repo + '</span>' +
+                '<span style="color:var(--accent);font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + r.repo + '">' + r.repo + sizeStr + '</span>' +
                 (r.success
                     ? '<span style="color:var(--success);font-family:monospace;font-size:11px;" title="' + r.path + '">☁️ ' + r.path + '</span>'
                     : '<span style="color:var(--error);font-size:11px;">失败</span>') +

@@ -121,124 +121,178 @@ public class GitHubService
     }
 
     /// <summary>
-    /// 下载仓库 ZIP 并写入目标流，支持进度回调。
+    /// 下载仓库 ZIP 并写入目标流，支持进度回调。内建流中断重试（最多额外 2 次）。
     /// </summary>
     /// <param name="estimatedSize">
     /// 预估文件总字节数（来自 GitHub API 的 repo.size 字段，单位 KB×1024）。
     /// 当 HTTP Content-Length 不可用时，用此值计算下载百分比。
     /// </param>
+    /// <param name="maxStreamRetries">流读取中断时的额外重试次数（默认 2，即最多 3 次总尝试）</param>
     public async Task<long> DownloadRepositoryAsync(
         string owner, string repo, string branch, string? githubToken,
         Stream destination, long estimatedSize = 0,
-        Action<long, long>? progressCallback = null)
+        Action<long, long>? progressCallback = null,
+        int maxStreamRetries = 2)
     {
         var failures = new List<string>();
-        HttpResponseMessage? response = null;
 
-        // 方案1: github.com 直接 archive 下载
-        var archiveUrl = $"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip";
-        var (resp1, failReason1) = await TryDownloadWithReasonAsync(archiveUrl, githubToken);
-        if (resp1 != null)
+        // 尝试 3 种下载 URL 的本地函数
+        async Task<HttpResponseMessage?> GetDownloadResponseAsync()
         {
-            response = resp1;
-            _logger.LogInformation("✅ github archive 成功: {Url}", archiveUrl);
-        }
-        else
-        {
-            failures.Add($"[github archive] {failReason1}");
-        }
+            failures.Clear();
+            HttpResponseMessage? response = null;
 
-        // 方案2: codeload.github.com
-        if (response == null)
-        {
-            var codeloadUrl = $"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}";
-            var (resp2, failReason2) = await TryDownloadWithReasonAsync(codeloadUrl, githubToken);
-            if (resp2 != null)
+            // 方案1: github.com 直接 archive 下载
+            var archiveUrl = $"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip";
+            var (resp1, failReason1) = await TryDownloadWithReasonAsync(archiveUrl, githubToken);
+            if (resp1 != null)
             {
-                response = resp2;
-                _logger.LogInformation("✅ codeload 成功: {Url}", codeloadUrl);
+                response = resp1;
+                _logger.LogInformation("✅ github archive 成功: {Url}", archiveUrl);
             }
             else
             {
-                failures.Add($"[codeload] {failReason2}");
+                failures.Add($"[github archive] {failReason1}");
             }
+
+            // 方案2: codeload.github.com
+            if (response == null)
+            {
+                var codeloadUrl = $"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}";
+                var (resp2, failReason2) = await TryDownloadWithReasonAsync(codeloadUrl, githubToken);
+                if (resp2 != null)
+                {
+                    response = resp2;
+                    _logger.LogInformation("✅ codeload 成功: {Url}", codeloadUrl);
+                }
+                else
+                {
+                    failures.Add($"[codeload] {failReason2}");
+                }
+            }
+
+            // 方案3: API zipball
+            if (response == null)
+            {
+                var apiArchiveUrl = $"https://api.github.com/repos/{owner}/{repo}/zipball/{branch}";
+                var (resp3, failReason3) = await TryDownloadWithReasonAsync(apiArchiveUrl, githubToken);
+                if (resp3 != null)
+                {
+                    response = resp3;
+                    _logger.LogInformation("✅ API archive 成功: {Url}", apiArchiveUrl);
+                }
+                else
+                {
+                    failures.Add($"[API archive] {failReason3}");
+                }
+            }
+
+            return response;
         }
 
-        // 方案3: API zipball
-        if (response == null)
+        int totalAttempts = maxStreamRetries + 1; // 首次 + retry 次数
+        for (int attempt = 0; attempt < totalAttempts; attempt++)
         {
-            var apiArchiveUrl = $"https://api.github.com/repos/{owner}/{repo}/zipball/{branch}";
-            var (resp3, failReason3) = await TryDownloadWithReasonAsync(apiArchiveUrl, githubToken);
-            if (resp3 != null)
+            // 重试时重置 destination 流位置
+            if (attempt > 0 && destination.CanSeek)
             {
-                response = resp3;
-                _logger.LogInformation("✅ API archive 成功: {Url}", apiArchiveUrl);
+                destination.SetLength(0);
+                destination.Position = 0;
+            }
+
+            var response = await GetDownloadResponseAsync();
+
+            // 三个方式都失败 → 输出详细原因
+            if (response == null)
+            {
+                var detail = string.Join("; ", failures);
+                _logger.LogWarning("三个下载方式全部失败: {Owner}/{Repo} ({Branch}) | 详情: {Detail}",
+                    owner, repo, branch, detail);
+                throw new InvalidOperationException(
+                    $"仓库无可用内容: {owner}/{repo} ({branch})。" +
+                    $"详情: {detail}。" +
+                    "请确认: 1) Token 有该仓库的 repo 权限 2) 仓库非空 3) 分支名正确。");
+            }
+
+            // 优先用 HTTP Content-Length（精确）。
+            // 注意：不能 fallback 到 estimatedSize（GitHub API 的 repo.size），
+            // 因为 repo.size 是整个仓库含 .git 历史的大小，而 ZIP 下载只是当前分支快照，
+            // 实际 ZIP 通常远小于 repo.size，会误导进度条（如显示 150/300MB 实际已下完）。
+            var contentLength = response.Content.Headers.ContentLength;
+            var totalSize = contentLength ?? 0; // 未知大小时不伪造总大小
+
+            if (attempt == 0)
+            {
+                _logger.LogInformation("正在下载: {Owner}/{Repo} ({Branch}), Content-Length={CL}, 预估={Est}MB",
+                    owner, repo, branch,
+                    contentLength, estimatedSize / 1024.0 / 1024.0);
+
+                // 立即报告初始进度（让前端看到总量和 0%）
+                progressCallback?.Invoke(0, totalSize);
             }
             else
             {
-                failures.Add($"[API archive] {failReason3}");
+                _logger.LogWarning("第 {Attempt}/{Max} 次流重试: {Owner}/{Repo}，Content-Length={CL}",
+                    attempt + 1, totalAttempts, owner, repo, contentLength);
+                progressCallback?.Invoke(0, totalSize);
+            }
+
+            try
+            {
+                // 流式下载：直接从 HTTP 响应体分块读取。
+                // HttpClientHandler 已配置 AutomaticDecompression=None + AllowAutoRedirect=true，
+                // 重定向后的响应体为原始 ZIP 字节流，不触发 .NET 10 的 DeflateStream 兼容问题。
+                using var netStream = await response.Content.ReadAsStreamAsync();
+                var buffer = new byte[81920]; // 80KB 分块
+                long totalRead = 0;
+                int bytesRead;
+
+                while ((bytesRead = await netStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                {
+                    await destination.WriteAsync(buffer, 0, bytesRead);
+                    totalRead += bytesRead;
+                    progressCallback?.Invoke(totalRead, totalSize);
+                }
+
+                await destination.FlushAsync();
+
+                // 完整性校验：对比实际下载字节数与 Content-Length
+                if (contentLength.HasValue && totalRead < contentLength.Value)
+                {
+                    throw new IOException(
+                        $"下载不完整: 预期 {FormatBytes(contentLength.Value)}，" +
+                        $"实际仅下载 {FormatBytes(totalRead)} ({totalRead * 100L / contentLength.Value}%)。" +
+                        "连接可能提前断开。");
+                }
+
+                _logger.LogInformation("下载完成，实际大小: {Size}MB", totalRead / 1024.0 / 1024.0);
+                return totalRead;
+            }
+            catch (Exception ex) when (ex is IOException or HttpRequestException
+                                         && attempt < totalAttempts - 1)
+            {
+                response.Dispose();
+                var delayMs = (attempt + 1) * 3000; // 递增等待: 3s, 6s
+                _logger.LogWarning(ex,
+                    "下载流中断 [第{Attempt}次, 共{Max}次]: {Owner}/{Repo}。" +
+                    "等待 {Delay}s 后重试...",
+                    attempt + 1, totalAttempts, owner, repo, delayMs / 1000);
+                await Task.Delay(delayMs);
             }
         }
 
-        // 三个方式都失败 → 输出详细原因
-        if (response == null)
-        {
-            var detail = string.Join("; ", failures);
-            _logger.LogWarning("三个下载方式全部失败: {Owner}/{Repo} ({Branch}) | 详情: {Detail}",
-                owner, repo, branch, detail);
-            throw new InvalidOperationException(
-                $"仓库无可用内容: {owner}/{repo} ({branch})。" +
-                $"详情: {detail}。" +
-                "请确认: 1) Token 有该仓库的 repo 权限 2) 仓库非空 3) 分支名正确。");
-        }
+        // 不应该执行到这里（最后一次循环会在 catch 中不满足 when 条件而抛出）
+        throw new InvalidOperationException(
+            $"下载失败：经过 {totalAttempts} 次尝试，流仍然中断。" +
+            $"请检查网络连接后重试。");
+    }
 
-        // 优先用 HTTP Content-Length（精确），否则用 GitHub API 预估大小
-        var contentLength = response.Content.Headers.ContentLength;
-        var totalSize = contentLength ?? estimatedSize;
-
-        _logger.LogInformation("正在下载: {Owner}/{Repo} ({Branch}), 大小: {Size}MB (Content-Length={CL}, 预估={Est}MB)",
-            owner, repo, branch, totalSize / 1024.0 / 1024.0,
-            contentLength, estimatedSize / 1024.0 / 1024.0);
-
-        // 立即报告初始进度（让前端看到总量和 0%）
-        progressCallback?.Invoke(0, totalSize);
-
-        // 流式下载：直接从 HTTP 响应体分块读取。
-        // HttpClientHandler 已配置 AutomaticDecompression=None + AllowAutoRedirect=true，
-        // 重定向后的响应体为原始 ZIP 字节流，不触发 .NET 10 的 DeflateStream 兼容问题。
-        using var netStream = await response.Content.ReadAsStreamAsync();
-        var buffer = new byte[81920]; // 80KB 分块
-        long totalRead = 0;
-        int bytesRead;
-
-        while ((bytesRead = await netStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
-        {
-            await destination.WriteAsync(buffer, 0, bytesRead);
-            totalRead += bytesRead;
-            progressCallback?.Invoke(totalRead, totalSize);
-        }
-
-        await destination.FlushAsync();
-
-        // 完整性校验：对比实际下载字节数与 Content-Length
-        if (contentLength.HasValue && totalRead < contentLength.Value)
-        {
-            throw new InvalidOperationException(
-                $"下载不完整: 预期 {FormatBytes(contentLength.Value)}，" +
-                $"实际仅下载 {FormatBytes(totalRead)} ({totalRead * 100L / contentLength.Value}%)。" +
-                "请重试或检查网络连接。");
-        }
-
-        _logger.LogInformation("下载完成，实际大小: {Size}MB", totalRead / 1024.0 / 1024.0);
-        return totalRead;
-
-        static string FormatBytes(long bytes)
-        {
-            if (bytes < 1024) return $"{bytes} B";
-            if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
-            if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
-            return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
-        }
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
     }
 
     /// <summary>

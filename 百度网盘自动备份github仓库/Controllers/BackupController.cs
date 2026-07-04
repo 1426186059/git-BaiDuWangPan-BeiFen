@@ -215,61 +215,57 @@ public class BackupController : ControllerBase
                 }));
             }
 
-            // 2. 从 GitHub 下载到临时文件（本地已存在则复用，跳过下载）
-            if (!System.IO.File.Exists(tempFile))
+            // 2. 从 GitHub 下载到临时文件
+            // 删除可能存在的残缺文件（上次下载中断留下的）
+            try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+            catch (Exception ex) { _logger.LogWarning(ex, "清理旧临时文件失败: {Temp}", tempFile); }
+
+            // 先通过 GitHub API 获取仓库元数据，拿到大小预估
+            long estimatedSize = 0;
+            try
             {
-                // 先通过 GitHub API 获取仓库元数据，拿到大小预估
-                long estimatedSize = 0;
-                try
-                {
-                    var (sizeKb, _) = await _gitHubService.GetRepoInfoAsync(
-                        request.Owner, request.Repo, request.GitHubToken);
-                    estimatedSize = sizeKb * 1024L; // KB → 字节（粗略估算）
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "获取仓库元数据失败（不影响下载），使用 0 作为预估值");
-                }
+                var (sizeKb, _) = await _gitHubService.GetRepoInfoAsync(
+                    request.Owner, request.Repo, request.GitHubToken);
+                estimatedSize = sizeKb * 1024L; // KB → 字节（粗略估算）
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "获取仓库元数据失败（不影响下载），使用 0 作为预估值");
+            }
 
-                progress.Message = $"📥 下载中... {zipFileName} (获取文件信息...)";
+            progress.Message = $"📥 下载中... {zipFileName} (获取文件信息...)";
 
-                var lastReport = DateTime.UtcNow;
-                long actualFileSize;
-                await using (var fs = new FileStream(tempFile, FileMode.Create, FileAccess.Write))
-                {
-                    actualFileSize = await _gitHubService.DownloadRepositoryAsync(
-                        request.Owner, request.Repo, request.Branch, request.GitHubToken,
-                        fs, estimatedSize,
-                        (downloaded, total) =>
+            var lastReport = DateTime.UtcNow;
+            long actualFileSize;
+            await using (var fs = new FileStream(tempFile, FileMode.Create, FileAccess.Write))
+            {
+                actualFileSize = await _gitHubService.DownloadRepositoryAsync(
+                    request.Owner, request.Repo, request.Branch, request.GitHubToken,
+                    fs, estimatedSize,
+                    (downloaded, total) =>
+                    {
+                        progress.TotalBytes = total;
+                        progress.DownloadedBytes = downloaded;
+                        progress.DownloadPercent = total > 0
+                            ? (int)(downloaded * 100 / total) : 0;
+
+                        var now = DateTime.UtcNow;
+                        if ((now - lastReport).TotalMilliseconds >= 200)
                         {
-                            progress.TotalBytes = total;
-                            progress.DownloadedBytes = downloaded;
-                            progress.DownloadPercent = total > 0
-                                ? (int)(downloaded * 100 / total) : 0;
-
-                            var now = DateTime.UtcNow;
-                            if ((now - lastReport).TotalMilliseconds >= 200)
-                            {
-                                progress.Message = $"📥 下载中... {zipFileName} ({FormatBytes(downloaded)}" +
-                                    (total > 0 ? $" / {FormatBytes(total)})" : ")");
-                                lastReport = now;
-                            }
-                        });
-                }
-
-                // ✅ 完整性校验：文件不能为空
-                if (actualFileSize == 0)
-                {
-                    throw new InvalidOperationException(
-                        $"下载失败: 文件大小为 0 ({zipFileName})。可能仓库内容为空或下载链接失效。");
-                }
-                _logger.LogInformation("下载完整性校验通过: {File} = {Size}MB", zipFileName, actualFileSize / 1024.0 / 1024.0);
+                            progress.Message = $"📥 下载中... {zipFileName} ({FormatBytes(downloaded)}" +
+                                (total > 0 ? $" / {FormatBytes(total)})" : ")");
+                            lastReport = now;
+                        }
+                    });
             }
-            else
+
+            // ✅ 完整性校验：文件不能为空
+            if (actualFileSize == 0)
             {
-                _logger.LogInformation("本地文件已存在，复用: {Temp}", tempFile);
-                progress.Message = $"📥 复用本地文件: {zipFileName}";
+                throw new InvalidOperationException(
+                    $"下载失败: 文件大小为 0 ({zipFileName})。可能仓库内容为空或下载链接失效。");
             }
+            _logger.LogInformation("下载完整性校验通过: {File} = {Size}MB", zipFileName, actualFileSize / 1024.0 / 1024.0);
 
             var fileInfo = new FileInfo(tempFile);
             progress.DownloadedBytes = fileInfo.Length;
@@ -372,38 +368,35 @@ public class BackupController : ControllerBase
             bool repoSuccess = false;
             try
             {
-                // 1. 从 GitHub 下载到临时文件（如果文件已存在则跳过下载）
-                if (!System.IO.File.Exists(tempFile))
-                {
-                    _logger.LogInformation("第{Attempt}次尝试 - 下载: {Owner}/{Repo}", attempt, repo.Owner, repo.Repo);
-                    long actualDownloadSize;
-                    await using (var fs = new FileStream(tempFile, FileMode.Create, FileAccess.Write))
-                    {
-                        actualDownloadSize = await _gitHubService.DownloadRepositoryAsync(
-                            repo.Owner, repo.Repo, repo.Branch, request.GitHubToken, fs);
-                    }
+                // 1. 从 GitHub 下载到临时文件
+                //    每次尝试前删除可能存在的残缺文件（上次中断留下的），确保完整重新下载
+                try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+                catch (Exception ex) { _logger.LogWarning(ex, "清理旧临时文件失败: {Temp}", tempFile); }
 
-                    // 完整性校验：文件不能为空，且不能明显小于实际写入量
-                    var dlFileInfo = new FileInfo(tempFile);
-                    if (dlFileInfo.Length == 0)
-                    {
-                        throw new InvalidOperationException(
-                            $"下载失败: 文件大小为 0 ({tempFile})。可能仓库内容为空或下载链接失效。");
-                    }
-                    if (actualDownloadSize > 0 && dlFileInfo.Length < actualDownloadSize)
-                    {
-                        throw new InvalidOperationException(
-                            $"文件写入不完整: 期望 {actualDownloadSize} 字节，磁盘仅有 {dlFileInfo.Length} 字节。");
-                    }
-                    _logger.LogInformation("下载完整性校验通过: {File} = {Size}MB",
-                        tempFile, dlFileInfo.Length / 1024.0 / 1024.0);
-                }
-                else
+                _logger.LogInformation("第{Attempt}次尝试 - 下载: {Owner}/{Repo}", attempt, repo.Owner, repo.Repo);
+                long actualDownloadSize;
+                await using (var fs = new FileStream(tempFile, FileMode.Create, FileAccess.Write))
                 {
-                    _logger.LogInformation("第{Attempt}次尝试 - 复用已有文件: {Temp}", attempt, tempFile);
+                    actualDownloadSize = await _gitHubService.DownloadRepositoryAsync(
+                        repo.Owner, repo.Repo, repo.Branch, request.GitHubToken, fs);
                 }
 
-                var fileInfo = new FileInfo(tempFile);
+                // 完整性校验：文件不能为空，且不能明显小于实际写入量
+                var dlFileInfo = new FileInfo(tempFile);
+                if (dlFileInfo.Length == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"下载失败: 文件大小为 0 ({tempFile})。可能仓库内容为空或下载链接失效。");
+                }
+                if (actualDownloadSize > 0 && dlFileInfo.Length < actualDownloadSize)
+                {
+                    throw new InvalidOperationException(
+                        $"文件写入不完整: 期望 {actualDownloadSize} 字节，磁盘仅有 {dlFileInfo.Length} 字节。");
+                }
+                _logger.LogInformation("下载完整性校验通过: {File} = {Size}MB",
+                    tempFile, dlFileInfo.Length / 1024.0 / 1024.0);
+
+                var fileInfo = dlFileInfo;
                 _logger.LogInformation("下载完成, 临时文件: {Temp}, 大小: {Size}MB",
                     tempFile, fileInfo.Length / 1024.0 / 1024.0);
 
@@ -428,6 +421,10 @@ public class BackupController : ControllerBase
             }
             catch (Exception ex)
             {
+                // 下载/上传失败 → 删除可能残缺的临时文件，确保下次重试从头开始
+                try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+                catch (Exception exDel) { _logger.LogWarning(exDel, "清理失败临时文件失败: {Temp}", tempFile); }
+
                 var msg = ex.Message;
                 // 可跳过的情况（空仓库/无内容/无访问权限）不重试
                 var isSkip = msg.Contains("无可用内容") || msg.Contains("仓库或分支不存在") || msg.Contains("无权访问");
@@ -465,8 +462,8 @@ public class BackupController : ControllerBase
         }
 
         // 所有重试都失败
-        _logger.LogError("重试{Max}次全部失败: {Owner}/{Repo}，保留文件: {Temp}",
-            maxRetries, repo.Owner, repo.Repo, tempFile);
+        _logger.LogError("重试{Max}次全部失败: {Owner}/{Repo}",
+            maxRetries, repo.Owner, repo.Repo);
         return (new BackupResult
         {
             Owner = repo.Owner,
