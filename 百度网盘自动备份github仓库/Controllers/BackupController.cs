@@ -376,11 +376,27 @@ public class BackupController : ControllerBase
                 if (!System.IO.File.Exists(tempFile))
                 {
                     _logger.LogInformation("第{Attempt}次尝试 - 下载: {Owner}/{Repo}", attempt, repo.Owner, repo.Repo);
+                    long actualDownloadSize;
                     await using (var fs = new FileStream(tempFile, FileMode.Create, FileAccess.Write))
                     {
-                        await _gitHubService.DownloadRepositoryAsync(
+                        actualDownloadSize = await _gitHubService.DownloadRepositoryAsync(
                             repo.Owner, repo.Repo, repo.Branch, request.GitHubToken, fs);
                     }
+
+                    // 完整性校验：文件不能为空，且不能明显小于实际写入量
+                    var dlFileInfo = new FileInfo(tempFile);
+                    if (dlFileInfo.Length == 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"下载失败: 文件大小为 0 ({tempFile})。可能仓库内容为空或下载链接失效。");
+                    }
+                    if (actualDownloadSize > 0 && dlFileInfo.Length < actualDownloadSize)
+                    {
+                        throw new InvalidOperationException(
+                            $"文件写入不完整: 期望 {actualDownloadSize} 字节，磁盘仅有 {dlFileInfo.Length} 字节。");
+                    }
+                    _logger.LogInformation("下载完整性校验通过: {File} = {Size}MB",
+                        tempFile, dlFileInfo.Length / 1024.0 / 1024.0);
                 }
                 else
                 {

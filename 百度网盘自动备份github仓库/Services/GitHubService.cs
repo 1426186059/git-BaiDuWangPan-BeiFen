@@ -219,8 +219,26 @@ public class GitHubService
         }
 
         await destination.FlushAsync();
+
+        // 完整性校验：对比实际下载字节数与 Content-Length
+        if (contentLength.HasValue && totalRead < contentLength.Value)
+        {
+            throw new InvalidOperationException(
+                $"下载不完整: 预期 {FormatBytes(contentLength.Value)}，" +
+                $"实际仅下载 {FormatBytes(totalRead)} ({totalRead * 100L / contentLength.Value}%)。" +
+                "请重试或检查网络连接。");
+        }
+
         _logger.LogInformation("下载完成，实际大小: {Size}MB", totalRead / 1024.0 / 1024.0);
         return totalRead;
+
+        static string FormatBytes(long bytes)
+        {
+            if (bytes < 1024) return $"{bytes} B";
+            if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+            if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+            return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+        }
     }
 
     /// <summary>
