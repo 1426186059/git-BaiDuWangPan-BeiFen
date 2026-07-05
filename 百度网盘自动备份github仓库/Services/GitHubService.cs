@@ -128,7 +128,7 @@ public class GitHubService
     /// 预估文件总字节数（来自 GitHub API 的 repo.size 字段，单位 KB×1024）。
     /// 当 HTTP Content-Length 不可用时，用此值计算下载百分比。
     /// </param>
-    /// <param name="maxStreamRetries">流读取中断时的额外重试次数（默认 2，即最多 3 次总尝试）</param>
+    /// <param name="maxStreamRetries">流读取中断时的额外重试次数（默认 5，即最多 6 次总尝试）</param>
     /// <param name="resumeFromBytes">
     /// 断点续传起始字节偏移量。0 表示全新下载。&gt;0 时方法会：
     /// ① 设置 destination.Position = resumeFromBytes
@@ -138,8 +138,8 @@ public class GitHubService
     public async Task<long> DownloadRepositoryAsync(
         string owner, string repo, string branch, string? githubToken,
         Stream destination, long estimatedSize = 0,
-        Action<long, long>? progressCallback = null,
-        int maxStreamRetries = 2,
+        Action<long, long, int, int>? progressCallback = null,
+        int maxStreamRetries = 5,
         long resumeFromBytes = 0)
     {
         var failures = new List<string>();
@@ -264,11 +264,27 @@ public class GitHubService
             }
             else
             {
-                // 200 OK：完整文件
+                // 200 OK：服务器不支持 Range 续传，或返回了完整文件
                 if (currentRangeStart > 0)
                 {
-                    // 请求了续传但服务器返回完整文件 → 可能文件已变化，截断重新下
-                    _logger.LogWarning("⚠️ 请求续传但服务器返回 200（完整文件），截断旧数据重新下载");
+                    // 服务器不支持 Range：不丢弃已有的 GB 级数据，先尝试转为完整下载
+                    _logger.LogWarning("⚠️ 请求 Range 续传但服务器返回 200（不支持 Range），转为完整下载（保留已有数据待确认）");
+                    response.Dispose();
+
+                    // 重新请求不带 Range 头的完整下载
+                    response = await GetDownloadResponseAsync(0);
+                    if (response == null)
+                    {
+                        // 完整下载也失败 → 保留已有部分数据，让外层重试继续处理
+                        var detail = string.Join("; ", failures);
+                        _logger.LogError("Range 续传失败（服务器不支持），转为完整下载也全部失败: {Detail}", detail);
+                        throw new InvalidOperationException(
+                            $"断点续传失败: 服务器不支持 HTTP Range，且转为完整下载后三个下载源也全部失败。" +
+                            $"详情: {detail}");
+                    }
+
+                    // 完整下载请求成功 → 安全截断旧数据，从头写入
+                    _logger.LogInformation("✅ 获取完整下载响应，截断旧数据重新写入");
                     if (destination.CanSeek)
                     {
                         destination.SetLength(0);
@@ -295,7 +311,7 @@ public class GitHubService
             }
 
             // 立即报告初始进度
-            progressCallback?.Invoke(alreadyDownloaded, totalFileSize);
+            progressCallback?.Invoke(alreadyDownloaded, totalFileSize, attempt, totalAttempts);
 
             try
             {
@@ -311,7 +327,8 @@ public class GitHubService
                 {
                     await destination.WriteAsync(buffer, 0, bytesRead);
                     newlyDownloaded += bytesRead;
-                    progressCallback?.Invoke(alreadyDownloaded + newlyDownloaded, totalFileSize);
+                    // 流重试后数据恢复传输 → 流重试计数器重置为 0
+                    progressCallback?.Invoke(alreadyDownloaded + newlyDownloaded, totalFileSize, 0, totalAttempts);
                 }
 
                 await destination.FlushAsync();

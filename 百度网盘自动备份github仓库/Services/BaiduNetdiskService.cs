@@ -125,7 +125,7 @@ public class BaiduNetdiskService
 
     public async Task<string> UploadFileAsync(
         string accessToken, Stream fileStream, string uploadPath, string fileName,
-        Action<int, int>? progressCallback = null)
+        Action<int, int, int, int>? progressCallback = null)
     {
         var fileSize = fileStream.Length;
 
@@ -207,7 +207,7 @@ public class BaiduNetdiskService
                         }
                     }
 
-                    progressCallback?.Invoke(i + 1, totalChunks);
+                    progressCallback?.Invoke(i + 1, totalChunks, attempt, MaxUploadRetries);
                     if ((i + 1) % 10 == 0 || i == totalChunks - 1)
                         _logger.LogInformation("进度: {D}/{T}", i + 1, totalChunks);
                 }

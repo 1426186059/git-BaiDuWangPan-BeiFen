@@ -7,7 +7,7 @@ public class SingleBackupRequest
     public string Branch { get; set; } = "main";
     public string AccessToken { get; set; } = "";
     public string? GitHubToken { get; set; }
-    public string UploadPath { get; set; } = "/apps/xuke/github仓库备份/";
+    public string UploadPath { get; set; } = "/github仓库备份/";
 }
 
 public class BatchBackupRequest
@@ -15,7 +15,7 @@ public class BatchBackupRequest
     public List<BackupRepoItem> Repos { get; set; } = new();
     public string AccessToken { get; set; } = "";
     public string? GitHubToken { get; set; }
-    public string UploadPath { get; set; } = "/apps/xuke/github仓库备份/";
+    public string UploadPath { get; set; } = "/github仓库备份/";
 }
 
 public class BackupRepoItem
@@ -118,6 +118,10 @@ public class BackupProgressInfo
     public bool IsCompleted { get; set; }
     /// <summary>是否成功</summary>
     public bool Success { get; set; }
+    /// <summary>当前重试次数（0=未重试）</summary>
+    public int RetryCount { get; set; }
+    /// <summary>最大重试次数</summary>
+    public int MaxRetries { get; set; }
     /// <summary>错误信息（失败时）</summary>
     public string? ErrorMessage { get; set; }
 }

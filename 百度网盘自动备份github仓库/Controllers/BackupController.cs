@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using BaiduBackup.Models;
@@ -215,18 +216,28 @@ public class BackupController : ControllerBase
             var lastReport = DateTime.UtcNow;
             var (downloadedFile, actualFileSize) = await DownloadRepoWithRetryAsync(
                 request.Owner, request.Repo, request.Branch, request.GitHubToken,
-                progressCallback: (downloaded, total) =>
+                progressCallback: (downloaded, total, round, attempt, maxAttempts, streamAttempt, streamTotal, maxRestarts) =>
                 {
                     progress.TotalBytes = total;
                     progress.DownloadedBytes = downloaded;
                     progress.DownloadPercent = total > 0
                         ? (int)(downloaded * 100 / total) : 0;
+                    progress.RetryCount = attempt;
+                    progress.MaxRetries = maxAttempts;
 
                     var now = DateTime.UtcNow;
                     if ((now - lastReport).TotalMilliseconds >= 200)
                     {
-                        progress.Message = $"📥 下载中... {zipFileName} ({ByteFormatter.Format(downloaded)}" +
-                            (total > 0 ? $" / {ByteFormatter.Format(total)})" : ")");
+                        // 三计数器: 重下=累计重新下载次数 最大值=MaxRestartCycles，流=流重试次数 最大值=maxStreamRetries，续=Range续传次数 最大值=AttemptsPerCycle-1
+                        int fullRestart = round + (attempt == maxAttempts ? 1 : 0);
+                        int streamRetry = streamAttempt;
+                        int rangeResume = (attempt == maxAttempts) ? 0 : Math.Max(0, attempt - 1);
+                        int maxStreamRetries = streamTotal - 1;
+                        int maxRangeResume = maxAttempts - 1;
+
+                        progress.Message = $"📥 下载中: {zipFileName} ({ByteFormatter.Format(downloaded)}" +
+                            (total > 0 ? $" / {ByteFormatter.Format(total)})" : ")") +
+                            $"\n第{fullRestart}/{maxRestarts}次重新下载 · 第{streamRetry}/{maxStreamRetries}次流重试 · 第{rangeResume}/{maxRangeResume}次Range续传";
                         lastReport = now;
                     }
                 });
@@ -246,13 +257,16 @@ public class BackupController : ControllerBase
             await using var readStream = new FileStream(tempFile, FileMode.Open, FileAccess.Read);
             var resultPath = await _baiduService.UploadFileAsync(
                 request.AccessToken, readStream, request.UploadPath, zipFileName,
-                (chunksDone, chunksTotal) =>
+                (chunksDone, chunksTotal, retryCount, maxRetries) =>
                 {
                     progress.UploadChunksDone = chunksDone;
                     progress.UploadChunksTotal = chunksTotal;
                     progress.UploadPercent = chunksTotal > 0
                         ? (int)(chunksDone * 100L / chunksTotal) : 0;
-                    progress.Message = $"📤 上传中... {zipFileName} ({progress.UploadPercent}%, 分片 {chunksDone}/{chunksTotal})";
+                    progress.RetryCount = retryCount;
+                    progress.MaxRetries = maxRetries;
+                    var retrySuffix = retryCount > 1 ? $" [第{retryCount}/{maxRetries}次]" : "";
+                    progress.Message = $"📤 上传中{retrySuffix}: {zipFileName} ({progress.UploadPercent}%, 分片 {chunksDone}/{chunksTotal})";
                 });
 
             // 完成
@@ -329,7 +343,7 @@ public class BackupController : ControllerBase
     /// <returns>(临时文件路径, 文件字节数)</returns>
     private async Task<(string TempFile, long FileSize)> DownloadRepoWithRetryAsync(
         string owner, string repo, string branch, string? gitHubToken,
-        Action<long, long>? progressCallback = null)
+        Action<long, long, int, int, int, int, int, int>? progressCallback = null)
     {
         var tempFile = Path.Combine(_tempDir, $"{repo}.zip");
         const int MaxRestartCycles = 3;
@@ -348,37 +362,38 @@ public class BackupController : ControllerBase
             _logger.LogWarning(ex, "获取仓库元数据失败（不影响下载），使用 0 作为预估值");
         }
 
-        for (int restartCycle = 1; restartCycle <= MaxRestartCycles; restartCycle++)
+    for (int restartCycle = 1; restartCycle <= MaxRestartCycles; restartCycle++)
+    {
+        for (int attempt = 1; attempt <= AttemptsPerCycle; attempt++)
         {
-            for (int attempt = 1; attempt <= AttemptsPerCycle; attempt++)
+            // 更新进度中的重试信息
+            var progKey = $"{owner}/{repo}/{branch}";
+            if (_progress.TryGetValue(progKey, out var retryProg))
             {
-                try
-                {
-                    bool isFullRestart = (attempt == AttemptsPerCycle);
+                retryProg.RetryCount = attempt;
+                retryProg.MaxRetries = AttemptsPerCycle;
+            }
+
+            try
+            {
+                // 仅有第5次(AttemptsPerCycle)从头重新下载，前4次均优先尝试 Range 续传
+                bool isFullRestart = (attempt == AttemptsPerCycle);
 
                     // === 准备下载：决定文件模式和续传偏移 ===
                     long resumeFromBytes = 0;
                     FileMode fileMode;
 
-                    if (attempt == 1 || isFullRestart)
+                    if (isFullRestart)
                     {
-                        // 首次或重新开始：清空旧文件
-                        if (isFullRestart)
-                        {
-                            try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
-                            catch (Exception ex) { _logger.LogWarning(ex, "重新开始前清理临时文件失败: {Temp}", tempFile); }
-                        }
-                        else if (restartCycle > 1)
-                        {
-                            try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
-                            catch { }
-                        }
+                        // 第5次：强制从头下载，先清理旧文件
+                        try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
+                        catch (Exception ex) { _logger.LogWarning(ex, "重新开始前清理临时文件失败: {Temp}", tempFile); }
                         fileMode = FileMode.Create;
                         resumeFromBytes = 0;
                     }
                     else
                     {
-                        // 继续下载：读取现有文件大小作为续传起点
+                        // 第1-4次：优先读取已有临时文件做 Range 续传（保留已下载的 GB 级数据）
                         if (System.IO.File.Exists(tempFile))
                         {
                             var existingInfo = new FileInfo(tempFile);
@@ -402,9 +417,8 @@ public class BackupController : ControllerBase
                         }
                     }
 
-                    var phaseLabel = attempt == 1 ? "首次下载" :
-                                     isFullRestart ? "重新开始下载" :
-                                     resumeFromBytes > 0 ? $"继续下载(已有{ByteFormatter.Format(resumeFromBytes)})" : "继续下载";
+                    var phaseLabel = isFullRestart ? "重新开始下载" :
+                                     resumeFromBytes > 0 ? $"续传下载(已有{ByteFormatter.Format(resumeFromBytes)})" : "全新下载";
                     _logger.LogInformation("第{Round}轮·第{Attempt}/{Max}次 ({Phase}): {Owner}/{Repo}",
                         restartCycle, attempt, AttemptsPerCycle, phaseLabel, owner, repo);
 
@@ -415,7 +429,14 @@ public class BackupController : ControllerBase
                     {
                         actualDownloadSize = await _gitHubService.DownloadRepositoryAsync(
                             owner, repo, branch, gitHubToken, fs,
-                            estimatedSize, progressCallback,
+                            estimatedSize,
+                            // 包装回调：把外层轮/次 + 内层流重试次数合并传给调用方
+                            progressCallback != null
+                                ? (downloaded, total, streamAttempt, streamTotal) =>
+                                    progressCallback(downloaded, total,
+                                        restartCycle, attempt, AttemptsPerCycle,
+                                        streamAttempt, streamTotal, MaxRestartCycles)
+                                : null,
                             resumeFromBytes: resumeFromBytes);
                     }
 
@@ -446,24 +467,44 @@ public class BackupController : ControllerBase
 
                     var isRestart = (attempt == AttemptsPerCycle);
                     var partialInfo = System.IO.File.Exists(tempFile) ? new FileInfo(tempFile) : null;
+                    var partialMB = partialInfo?.Length / 1024.0 / 1024.0 ?? 0;
                     _logger.LogWarning(ex, "第{Round}轮·第{Attempt}/{Max}次失败{IsRestart}: {Owner}/{Repo}，已下载 {Partial}MB",
                         restartCycle, attempt, AttemptsPerCycle,
                         isRestart ? "（本轮已重新开始）" : "",
-                        owner, repo,
-                        partialInfo?.Length / 1024.0 / 1024.0 ?? 0);
+                        owner, repo, partialMB);
+
+                    // 更新页面上显示的重试状态
+                    if (_progress.TryGetValue(progKey, out var failProg))
+                    {
+                        failProg.RetryCount = attempt;
+                        failProg.MaxRetries = AttemptsPerCycle;
+                    }
 
                     if (attempt < AttemptsPerCycle)
                     {
                         // 继续下载：不删文件（保留已有数据供 Range 续传），等 5s 后再试
+                        if (_progress.TryGetValue(progKey, out var retryMsgProg))
+                        {
+                            retryMsgProg.Message = $"⚠️ 第{restartCycle}轮第{attempt}/{AttemptsPerCycle}次下载失败，保留已下载 {partialMB:F1}MB，{ContinueDelayMs / 1000}s 后第{restartCycle}轮第{attempt + 1}/{AttemptsPerCycle}次续传...";
+                        }
                         _logger.LogInformation("→ 继续下载（保留 {Partial}MB 已下载数据），等待 {Delay}s...",
-                            partialInfo?.Length / 1024.0 / 1024.0 ?? 0, ContinueDelayMs / 1000);
+                            partialMB, ContinueDelayMs / 1000);
                         await Task.Delay(ContinueDelayMs);
                     }
                     else
                     {
-                        // 重新开始下载失败：删掉残缺文件，下一轮从头来
+                        // 第5次失败：删掉残缺文件，如果还有下一轮则提示
+                        if (_progress.TryGetValue(progKey, out var restartProg))
+                        {
+                            var nextRound = restartCycle + 1;
+                            restartProg.Message = nextRound <= MaxRestartCycles
+                                ? $"⚠️ 第{restartCycle}轮全部 {AttemptsPerCycle} 次失败，清理临时文件，{ContinueDelayMs / 1000}s 后第{nextRound}轮从头下载..."
+                                : $"⚠️ 第{restartCycle}轮全部 {AttemptsPerCycle} 次失败，已无剩余轮次...";
+                        }
                         try { if (System.IO.File.Exists(tempFile)) System.IO.File.Delete(tempFile); }
                         catch (Exception exDel) { _logger.LogWarning(exDel, "清理残缺文件失败: {Temp}", tempFile); }
+                        if (restartCycle < MaxRestartCycles)
+                            await Task.Delay(ContinueDelayMs);
                     }
                 }
             }
