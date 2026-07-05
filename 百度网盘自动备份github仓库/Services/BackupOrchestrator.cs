@@ -181,14 +181,19 @@ public class BackupOrchestrator
                     progress.DownloadedBytes = downloaded;
                     progress.DownloadPercent = total > 0
                         ? (int)(downloaded * 100 / total) : 0;
-                    progress.RetryCount = attempt;
-                    progress.MaxRetries = maxAttempts;
+                    progress.DownloadRestartRound = round - 1;
+                    progress.DownloadRestartMaxRounds = maxRestarts;
+                    progress.DownloadAttempt = attempt - 1;
+                    progress.DownloadMaxAttempts = maxAttempts;
+                    progress.DownloadStreamAttempt = streamAttempt;
+                    progress.DownloadStreamMaxAttempts = streamTotal;
 
                     var now = DateTime.UtcNow;
                     if ((now - lastReport).TotalMilliseconds >= 200)
                     {
+                        var info = $"重新下载次数: {round - 1}/{maxRestarts}，流重试次数：{streamAttempt}/{streamTotal}，Range续传：{attempt - 1}/{maxAttempts}";
                         progress.Message = $"📥 下载中: {zipFileName} ({ByteFormatter.Format(downloaded)}" +
-                            (total > 0 ? $" / {ByteFormatter.Format(total)})" : ")");
+                            (total > 0 ? $" / {ByteFormatter.Format(total)})" : ")") + "\n" + info;
                         lastReport = now;
                     }
                 });
@@ -213,7 +218,8 @@ public class BackupOrchestrator
                         ? (int)(chunksDone * 100L / chunksTotal) : 0;
                     progress.RetryCount = retryCount;
                     progress.MaxRetries = maxRetries;
-                    progress.Message = $"📤 上传中: {zipFileName} ({progress.UploadPercent}%, 分片 {chunksDone}/{chunksTotal})";
+                    var upRetryHint = retryCount > 0 ? $"\n上传重试次数: {retryCount}/{maxRetries}" : "";
+                    progress.Message = $"📤 上传中: {zipFileName} ({progress.UploadPercent}%, 分片 {chunksDone}/{chunksTotal}){upRetryHint}";
                 });
 
             success = true;
@@ -328,7 +334,7 @@ public class BackupOrchestrator
                             progressCallback != null
                                 ? (downloaded, total, streamAttempt, streamTotal) =>
                                     progressCallback(downloaded, total,
-                                        restartCycle, attempt, AttemptsPerCycle,
+                                        restartCycle, attempt, AttemptsPerCycle - 1,
                                         streamAttempt, streamTotal, MaxRestartCycles)
                                 : null,
                             resumeFromBytes: resumeFromBytes);

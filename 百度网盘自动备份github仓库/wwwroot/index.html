@@ -612,7 +612,7 @@ function renderRepoList() {
                 <option value="main">main</option><option value="master">master</option>
             </select>
             ${r.status?`<span class="repo-status ${r.status}">${statusText(r.status)}</span>`:''}
-            ${r.status==='done'&&!state.isRunning?`<button class="btn btn-sm btn-outline rebackup-btn" onclick="event.stopPropagation();reBackup(${i})" title="重新备份此仓库">🔄 重备</button>`:''}
+            ${r.status==='done'&&!state.isRunning?`<button class="btn btn-sm btn-outline rebackup-btn" onclick="event.stopPropagation();reBackup(${i})" title="重新备份此仓库">🔄 重新备份</button>`:''}
         </div>`).join('');
 }
 
@@ -809,13 +809,8 @@ function updateDetailProgress(p) {
     if(p.stage==='done') dom.detailProgressBar.classList.add('success');
     else dom.detailProgressBar.classList.remove('success');
 
-    // 详细文字（支持换行显示）
-    var msg = (p.message || (barPct + '%'));
-    // 重试次数显示
-    if(p.retryCount !== undefined && p.retryCount > 0 && p.maxRetries !== undefined) {
-        msg += '<br><span style="color:var(--warning);font-size:12px;">🔄 重试中: ' + p.retryCount + '/' + p.maxRetries + '</span>';
-    }
-    dom.detailProgressText.innerHTML = msg.replace(/\n/g, '<br>');
+    // 详细文字（支持换行显示），重试信息已包含在 message 中
+    dom.detailProgressText.innerHTML = (p.message || (barPct + '%')).replace(/\n/g, '<br>');
 }
 
 // ==================== 备份结果显示 ====================

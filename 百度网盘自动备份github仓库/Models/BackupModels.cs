@@ -118,9 +118,21 @@ public class BackupProgressInfo
     public bool IsCompleted { get; set; }
     /// <summary>是否成功</summary>
     public bool Success { get; set; }
-    /// <summary>当前重试次数（0=未重试）</summary>
+    /// <summary>下载：已重启轮次（0=尚未重启）</summary>
+    public int DownloadRestartRound { get; set; }
+    /// <summary>下载：最大重启轮次数</summary>
+    public int DownloadRestartMaxRounds { get; set; }
+    /// <summary>下载：当前轮内重试次数（0=尚未重试）</summary>
+    public int DownloadAttempt { get; set; }
+    /// <summary>下载：每轮最大Range续传次数(不含第5次完整重下)</summary>
+    public int DownloadMaxAttempts { get; set; }
+    /// <summary>下载：流中断重试次数（0=无重试）</summary>
+    public int DownloadStreamAttempt { get; set; }
+    /// <summary>下载：流中断最大重试次数</summary>
+    public int DownloadStreamMaxAttempts { get; set; }
+    /// <summary>上传：当前重试次数（0=未重试）</summary>
     public int RetryCount { get; set; }
-    /// <summary>最大重试次数</summary>
+    /// <summary>上传：最大重试次数</summary>
     public int MaxRetries { get; set; }
     /// <summary>错误信息（失败时）</summary>
     public string? ErrorMessage { get; set; }

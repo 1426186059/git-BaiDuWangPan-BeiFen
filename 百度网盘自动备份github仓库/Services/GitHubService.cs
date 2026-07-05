@@ -244,7 +244,7 @@ public class GitHubService
                 remainingToDownload = totalFileSize;
             }
 
-            progressCallback?.Invoke(alreadyDownloaded, totalFileSize, attempt, totalAttempts);
+            progressCallback?.Invoke(alreadyDownloaded, totalFileSize, attempt, maxStreamRetries);
 
             try
             {
@@ -257,7 +257,7 @@ public class GitHubService
                 {
                     await destination.WriteAsync(buffer, 0, bytesRead);
                     newlyDownloaded += bytesRead;
-                    progressCallback?.Invoke(alreadyDownloaded + newlyDownloaded, totalFileSize, 0, totalAttempts);
+                    progressCallback?.Invoke(alreadyDownloaded + newlyDownloaded, totalFileSize, 0, maxStreamRetries);
                 }
 
                 await destination.FlushAsync();
