@@ -333,9 +333,14 @@ public class BackupOrchestrator
                             owner, repo, branch, gitHubToken, fs, estimatedSize,
                             progressCallback != null
                                 ? (downloaded, total, streamAttempt, streamTotal) =>
+                                {
+                                    // streamAttempt=-1 → 流恢复，Range续传和流重试均置 0
+                                    int outAttempt = streamAttempt < 0 ? 1 : attempt;
+                                    int outStream   = streamAttempt < 0 ? 0 : streamAttempt;
                                     progressCallback(downloaded, total,
-                                        restartCycle, attempt, AttemptsPerCycle - 1,
-                                        streamAttempt, streamTotal, MaxRestartCycles)
+                                        restartCycle, outAttempt, AttemptsPerCycle - 1,
+                                        outStream, streamTotal, MaxRestartCycles);
+                                }
                                 : null,
                             resumeFromBytes: resumeFromBytes);
                     }
@@ -404,7 +409,7 @@ public class BackupOrchestrator
             if (backupResult.Success)
                 result.SuccessCount++;
             else
-                result.SkippedCount++;
+                result.FailCount++;
             result.Results.Add(backupResult);
 
             if (!backupResult.Success) break;

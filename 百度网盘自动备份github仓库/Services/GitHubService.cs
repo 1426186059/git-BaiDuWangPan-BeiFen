@@ -244,7 +244,9 @@ public class GitHubService
                 remainingToDownload = totalFileSize;
             }
 
-            progressCallback?.Invoke(alreadyDownloaded, totalFileSize, attempt, maxStreamRetries);
+            // -1 = 流恢复成功信号，外层收到后将 Range续传/流重试 均置 0
+            progressCallback?.Invoke(alreadyDownloaded, totalFileSize,
+                attempt > 0 ? -1 : 0, maxStreamRetries);
 
             try
             {

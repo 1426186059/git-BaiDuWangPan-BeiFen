@@ -175,7 +175,7 @@ public class BaiduNetdiskService
                         }
                     }
 
-                    progressCallback?.Invoke(i + 1, totalChunks, attempt, MaxUploadRetries);
+                    progressCallback?.Invoke(i + 1, totalChunks, attempt - 1, MaxUploadRetries);
                 }
 
                 await CreateSuperFileWithRetryAsync(accessToken, tempPath, fileSize, blockList, uploadid);

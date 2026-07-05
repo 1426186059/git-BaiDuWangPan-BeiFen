@@ -5,16 +5,6 @@ using System.Security.Cryptography.X509Certificates;
 using BaiduBackup.Models;
 using BaiduBackup.Services;
 
-// ⚠️ 全局 SSL 兜底：ServicePointManager 兼容旧式 API（WebRequest 等）
-ServicePointManager.SecurityProtocol =
-    SecurityProtocolType.Tls12 |
-    SecurityProtocolType.Tls13 |
-    SecurityProtocolType.Tls11 |
-    SecurityProtocolType.Tls;
-ServicePointManager.ServerCertificateValidationCallback = (_, _, _, _) => true;
-ServicePointManager.Expect100Continue = true;
-ServicePointManager.DefaultConnectionLimit = 100;
-
 var builder = WebApplication.CreateBuilder(args);
 
 // Minimal API JSON 源生成上下文（AOT 兼容）
