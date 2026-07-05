@@ -671,6 +671,10 @@ async function doBackup(repos) {
     if(state.isRunning) return;
     if(!await ensureValidToken()) { toast('❌ Token无效，请重新授权','error'); return; }
     state.isRunning = true; updateButtons();
+    // 新备份开始 → 隐藏"全部备份完成"横幅
+    state.allComplete = false;
+    state.allCompleteTime = null;
+    checkAllCompleteBanner();
     showProgress(true); updateProgress(0, '[0/'+repos.length+'] 开始备份...');
     dom.detailProgress.style.display = 'none';
     log('🚀 ========== 开始备份 '+repos.length+' 个仓库 ==========');

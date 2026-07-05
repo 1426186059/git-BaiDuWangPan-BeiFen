@@ -66,12 +66,22 @@ public class BackupOrchestrator
         SaveRecords(records);
     }
 
+    private void ClearAllComplete()
+    {
+        var records = LoadRecords();
+        if (records.AllComplete)
+        {
+            records.AllComplete = false;
+            records.AllCompleteTime = null;
+            SaveRecords(records);
+        }
+    }
+
     private void CheckAllComplete()
     {
         var records = LoadRecords();
-        if (records.AllComplete) return;
-
-        if (records.TotalRepoCount > 0 && records.BackedUp.Count >= records.TotalRepoCount)
+        // 不再短路：每次都会重新评估，允许「再次备份」后重新判定
+        if (records.TotalRepoCount > 0 && records.BackedUp.Count >= records.TotalRepoCount && !records.AllComplete)
         {
             records.AllComplete = true;
             records.AllCompleteTime = DateTime.UtcNow;
@@ -95,7 +105,10 @@ public class BackupOrchestrator
     public void SetTotalRepoCount(int totalCount)
     {
         var records = LoadRecords();
+        // 总仓库数变更时（如切换 GitHub 账号），清除全部完成标记，让后续 CheckAllComplete 基于新数据重新判定
         records.TotalRepoCount = totalCount;
+        records.AllComplete = false;
+        records.AllCompleteTime = null;
         SaveRecords(records);
         CheckAllComplete();
     }
@@ -138,6 +151,9 @@ public class BackupOrchestrator
 
         var key = $"{request.Owner}/{request.Repo}/{request.Branch}";
         var zipFileName = $"{request.Repo}.zip";
+
+        // 新备份开始 → 清除"全部完成"标记，后续 CheckAllComplete 会基于最新数据重新判定
+        ClearAllComplete();
 
         var progress = new BackupProgressInfo
         {

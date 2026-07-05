@@ -29,9 +29,8 @@ public class GitHubService
         int page = 1;
         while (true)
         {
-            var url = !string.IsNullOrEmpty(githubToken)
-                ? $"https://api.github.com/user/repos?per_page=100&page={page}&sort=updated&type=all"
-                : $"https://api.github.com/users/{username}/repos?per_page=100&page={page}&sort=updated";
+            // 始终按 username 查询仓库；Token 仅用于认证（提限流、访问私有仓库）
+            var url = $"https://api.github.com/users/{username}/repos?per_page=100&page={page}&sort=updated";
 
             request.RequestUri = new Uri(url);
             using var response = await _http.SendAsync(request);
