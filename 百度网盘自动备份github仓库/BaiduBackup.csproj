@@ -6,10 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>BaiduBackup</RootNamespace>
     <AssemblyName>BaiduBackup</AssemblyName>
+    <!-- 全量 Minimal API + JsonSerializerContext，完全兼容 AOT -->
+    <PublishAot>true</PublishAot>
+    <StripSymbols>true</StripSymbols>
   </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Swashbuckle.AspNetCore" Version="7.2.0" />
-  </ItemGroup>
 
 </Project>

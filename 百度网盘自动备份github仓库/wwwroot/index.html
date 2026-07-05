@@ -141,6 +141,8 @@
         .repo-item .repo-status.done { background: var(--success-bg); color: var(--success); }
         .repo-item .repo-status.processing { background: rgba(88,166,255,0.15); color: var(--accent); }
         .repo-item .repo-status.failed { background: var(--error-bg); color: var(--error); }
+        .rebackup-btn { padding: 2px 8px !important; font-size: 11px !important; flex-shrink: 0; color: var(--accent) !important; border-color: var(--accent) !important; }
+        .rebackup-btn:hover { background: rgba(88,166,255,0.15) !important; }
         .repo-empty { text-align: center; padding: 30px; color: var(--text-secondary); font-size: 13px; }
 
         @media (max-width: 640px) {
@@ -400,13 +402,16 @@ function authorizeBaidu() {
     sessionStorage.setItem('baidu_oauth_state', oauthState);
 
     const redirectUri = getCallbackUri();
+    // 注意：redirect_uri 不进行 URL 编码，否则百度可能做原始字符串对比而导致 mismatch
     const authUrl = 'https://openapi.baidu.com/oauth/2.0/authorize?'+
         'response_type=code&client_id='+encodeURIComponent(state.appKey)+
-        '&redirect_uri='+encodeURIComponent(redirectUri)+
+        '&redirect_uri='+redirectUri+
         '&scope=basic,netdisk&display=page'+
         '&state='+encodeURIComponent(oauthState);
     log('🔗 正在跳转到百度授权页面...');
     log('💡 回调地址: '+redirectUri);
+    console.log('Auth URL:', authUrl);
+    console.log('Decoded redirect_uri:', decodeURIComponent(authUrl.match(/redirect_uri=([^&]+)/)[1]));
     window.location.href = authUrl;
 }
 
@@ -607,6 +612,7 @@ function renderRepoList() {
                 <option value="main">main</option><option value="master">master</option>
             </select>
             ${r.status?`<span class="repo-status ${r.status}">${statusText(r.status)}</span>`:''}
+            ${r.status==='done'&&!state.isRunning?`<button class="btn btn-sm btn-outline rebackup-btn" onclick="event.stopPropagation();reBackup(${i})" title="重新备份此仓库">🔄 重备</button>`:''}
         </div>`).join('');
 }
 
@@ -616,6 +622,17 @@ window.toggleRow = (i,e)=>{state.repoList[i].selected=!state.repoList[i].selecte
 window.changeBranch = (i,b)=>{state.repoList[i].branch=b;};
 function selectAll(){state.repoList.forEach(r=>r.selected=true);renderRepoList();updateButtons();}
 function deselectAll(){state.repoList.forEach(r=>r.selected=false);renderRepoList();updateButtons();}
+
+async function reBackup(i) {
+    if(state.isRunning) return;
+    var r = state.repoList[i];
+    // 取消其他仓库的选中，只选当前
+    state.repoList.forEach(x => x.selected = false);
+    r.selected = true;
+    r.status = 'processing';
+    renderRepoList(); updateButtons();
+    await doBackup([{owner: r.owner, repo: r.name, branch: r.branch}]);
+}
 
 // ==================== 备份操作 ====================
 async function backupSingle() {
@@ -793,7 +810,12 @@ function updateDetailProgress(p) {
     else dom.detailProgressBar.classList.remove('success');
 
     // 详细文字（支持换行显示）
-    dom.detailProgressText.innerHTML = (p.message || (barPct + '%')).replace(/\n/g, '<br>');
+    var msg = (p.message || (barPct + '%'));
+    // 重试次数显示
+    if(p.retryCount !== undefined && p.retryCount > 0 && p.maxRetries !== undefined) {
+        msg += '<br><span style="color:var(--warning);font-size:12px;">🔄 重试中: ' + p.retryCount + '/' + p.maxRetries + '</span>';
+    }
+    dom.detailProgressText.innerHTML = msg.replace(/\n/g, '<br>');
 }
 
 // ==================== 备份结果显示 ====================

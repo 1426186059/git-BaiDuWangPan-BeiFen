@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
+using BaiduBackup.Models;
 using BaiduBackup.Services;
 
 // ⚠️ 全局 SSL 兜底：ServicePointManager 兼容旧式 API（WebRequest 等）
@@ -16,10 +17,11 @@ ServicePointManager.DefaultConnectionLimit = 100;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 添加控制器
-builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+// Minimal API JSON 源生成上下文（AOT 兼容）
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonContext.Default);
+});
 
 // 注册 HttpClient
 builder.Services.AddHttpClient("BaiduApi", client =>
@@ -28,8 +30,6 @@ builder.Services.AddHttpClient("BaiduApi", client =>
     client.DefaultRequestHeaders.UserAgent.ParseAdd("BaiduBackup/1.0");
 }).ConfigurePrimaryHttpMessageHandler(() =>
 {
-    // BaiduApi 也不需要自动解压：ReadResponseStringAsync 已自行处理原始字节+UTF8解码。
-    // HTTP 层解压遇到 charset=utf8 头或异常 Content-Encoding 会导致 DeflateStream 报错。
     var handler = CreateSocketsHttpHandler();
     handler.AutomaticDecompression = DecompressionMethods.None;
     return handler;
@@ -41,10 +41,6 @@ builder.Services.AddHttpClient("GitHubApi", client =>
     client.DefaultRequestHeaders.UserAgent.ParseAdd("BaiduBackup/1.0");
 }).ConfigurePrimaryHttpMessageHandler(() =>
 {
-    // 使用 HttpClientHandler 而非 SocketsHttpHandler：
-    // .NET 10 预览版下 SocketsHttpHandler 即使设 None 仍可能触发解压，抛
-    // "The archive entry was compressed using an unsupported compression method"。
-    // HttpClientHandler 更简单，DecompressionMethods.None 行为更可靠。
     IWebProxy? proxy = null;
     var httpsProxy = Environment.GetEnvironmentVariable("HTTPS_PROXY")
                   ?? Environment.GetEnvironmentVariable("https_proxy");
@@ -60,7 +56,7 @@ builder.Services.AddHttpClient("GitHubApi", client =>
     {
         Proxy = proxy,
         UseProxy = proxy != null,
-        AutomaticDecompression = DecompressionMethods.None, // 关键：禁止解压
+        AutomaticDecompression = DecompressionMethods.None,
         AllowAutoRedirect = true,
         MaxAutomaticRedirections = 10,
         ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
@@ -68,7 +64,7 @@ builder.Services.AddHttpClient("GitHubApi", client =>
     };
 });
 
-// 诊断用裸 HttpClient（不走工厂，独立验证连通性）
+// 诊断用裸 HttpClient
 builder.Services.AddHttpClient("Diagnostics", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(15);
@@ -76,7 +72,6 @@ builder.Services.AddHttpClient("Diagnostics", client =>
 
 static SocketsHttpHandler CreateSocketsHttpHandler()
 {
-    // 检测系统代理（通过环境变量）
     IWebProxy? proxy = null;
     var httpsProxy = Environment.GetEnvironmentVariable("HTTPS_PROXY")
                   ?? Environment.GetEnvironmentVariable("https_proxy");
@@ -84,16 +79,11 @@ static SocketsHttpHandler CreateSocketsHttpHandler()
                   ?? Environment.GetEnvironmentVariable("http_proxy");
 
     if (!string.IsNullOrWhiteSpace(httpsProxy))
-    {
         proxy = new WebProxy(httpsProxy) { BypassProxyOnLocal = true };
-    }
     else if (!string.IsNullOrWhiteSpace(httpProxy))
-    {
         proxy = new WebProxy(httpProxy) { BypassProxyOnLocal = true };
-    }
     else
     {
-        // 兜底：使用 Windows 系统代理设置
         proxy = WebRequest.DefaultWebProxy;
         if (proxy != null)
             proxy.Credentials = CredentialCache.DefaultCredentials;
@@ -101,7 +91,6 @@ static SocketsHttpHandler CreateSocketsHttpHandler()
 
     return new SocketsHttpHandler
     {
-        // 🔑 关键：使用系统代理
         Proxy = proxy,
         UseProxy = proxy != null,
         AutomaticDecompression = DecompressionMethods.All,
@@ -122,6 +111,7 @@ static SocketsHttpHandler CreateSocketsHttpHandler()
 // 注册服务
 builder.Services.AddSingleton<BaiduNetdiskService>();
 builder.Services.AddSingleton<GitHubService>();
+builder.Services.AddSingleton<BackupOrchestrator>();
 
 // CORS 配置
 builder.Services.AddCors(options =>
@@ -136,24 +126,127 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
-
 app.UseStaticFiles();
 app.UseRouting();
 app.UseCors();
-app.MapControllers();
 
-app.MapGet("/api/tempdir", () => Results.Ok(new { tempDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "temp") }));
+// ==================== Auth 端点 ====================
 
-// ============ 网络诊断端点 ============
+app.MapPost("/api/auth/baidu", async (AuthRequest request, BaiduNetdiskService baidu) =>
+{
+    if (string.IsNullOrWhiteSpace(request.ClientId) ||
+        string.IsNullOrWhiteSpace(request.ClientSecret) ||
+        string.IsNullOrWhiteSpace(request.Code))
+    {
+        return Results.BadRequest(ApiResponse<TokenResponse>.Fail("缺少必填参数"));
+    }
+
+    try
+    {
+        var token = await baidu.ExchangeCodeForTokenAsync(
+            request.ClientId, request.ClientSecret, request.Code, request.RedirectUri);
+        return Results.Ok(ApiResponse<TokenResponse>.Ok(token));
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(ApiResponse<TokenResponse>.Fail(GetFullError(ex)));
+    }
+});
+
+app.MapPost("/api/auth/refresh", async (RefreshRequest request, BaiduNetdiskService baidu) =>
+{
+    if (string.IsNullOrWhiteSpace(request.RefreshToken) ||
+        string.IsNullOrWhiteSpace(request.ClientId) ||
+        string.IsNullOrWhiteSpace(request.ClientSecret))
+    {
+        return Results.BadRequest(ApiResponse<TokenResponse>.Fail("缺少必填参数"));
+    }
+
+    try
+    {
+        var token = await baidu.RefreshTokenAsync(
+            request.RefreshToken, request.ClientId, request.ClientSecret);
+        return Results.Ok(ApiResponse<TokenResponse>.Ok(token));
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(ApiResponse<TokenResponse>.Fail(GetFullError(ex)));
+    }
+});
+
+// ==================== GitHub 端点 ====================
+
+app.MapGet("/api/github/repos/{username}", async (string username, string? token, GitHubService github) =>
+{
+    if (string.IsNullOrWhiteSpace(username))
+        return Results.BadRequest(ApiResponse<List<GitHubRepoInfo>>.Fail("用户名不能为空"));
+
+    try
+    {
+        var repos = await github.GetRepositoriesAsync(username, token);
+        return Results.Ok(ApiResponse<List<GitHubRepoInfo>>.Ok(repos));
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(ApiResponse<List<GitHubRepoInfo>>.Fail(GetFullError(ex)));
+    }
+});
+
+// ==================== Backup 端点 ====================
+
+app.MapGet("/api/backup/records", (BackupOrchestrator orch) =>
+    Results.Ok(ApiResponse<BackupRecordView>.Ok(orch.GetRecords())));
+
+app.MapPost("/api/backup/records/settotal", (SetTotalRequest req, BackupOrchestrator orch) =>
+{
+    orch.SetTotalRepoCount(req.TotalCount);
+    return Results.Ok(ApiResponse<bool>.Ok(true));
+});
+
+app.MapPost("/api/backup/records/reset", (BackupOrchestrator orch) =>
+{
+    orch.ResetRecords();
+    return Results.Ok(ApiResponse<bool>.Ok(true));
+});
+
+app.MapGet("/api/backup/progress", (string owner, string repo, string? branch, BackupOrchestrator orch) =>
+    Results.Ok(ApiResponse<BackupProgressInfo>.Ok(orch.GetProgress(owner, repo, branch ?? "main"))));
+
+app.MapPost("/api/backup/single", async (SingleBackupRequest request, BackupOrchestrator orch) =>
+{
+    var result = await orch.BackupSingleAsync(request);
+    return Results.Ok(ApiResponse<BackupResult>.Ok(result));
+});
+
+app.MapPost("/api/backup/batch", async (BatchBackupRequest request, BackupOrchestrator orch) =>
+{
+    if (request.Repos == null || request.Repos.Count == 0)
+        return Results.BadRequest(ApiResponse<BatchBackupResult>.Fail("仓库列表不能为空"));
+    if (string.IsNullOrWhiteSpace(request.AccessToken))
+        return Results.BadRequest(ApiResponse<BatchBackupResult>.Fail("缺少百度网盘 access_token"));
+
+    try
+    {
+        var result = await orch.BackupBatchAsync(request);
+        return Results.Ok(ApiResponse<BatchBackupResult>.Ok(result));
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(ApiResponse<BatchBackupResult>.Fail(GetFullError(ex)));
+    }
+});
+
+// ==================== 工具端点 ====================
+
+app.MapGet("/api/tempdir", () =>
+    Results.Ok(new TempDirInfo { TempDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "temp") }));
+
+// ==================== 网络诊断端点 ====================
+
 app.MapGet("/api/diagnostics/network", async (IHttpClientFactory httpClientFactory) =>
 {
     var client = httpClientFactory.CreateClient("Diagnostics");
-    var results = new List<object>();
+    var results = new List<DiagnosticsTargetResult>();
 
     var targets = new[]
     {
@@ -169,18 +262,16 @@ app.MapGet("/api/diagnostics/network", async (IHttpClientFactory httpClientFacto
         try
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+            using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            sw.Stop();
+            results.Add(new DiagnosticsTargetResult
             {
-                sw.Stop();
-                results.Add(new
-                {
-                    target = name,
-                    url,
-                    ok = true,
-                    statusCode = (int)response.StatusCode,
-                    latencyMs = sw.ElapsedMilliseconds
-                });
-            }
+                Target = name,
+                Url = url,
+                Ok = true,
+                StatusCode = (int)response.StatusCode,
+                LatencyMs = sw.ElapsedMilliseconds
+            });
         }
         catch (Exception ex)
         {
@@ -191,19 +282,18 @@ app.MapGet("/api/diagnostics/network", async (IHttpClientFactory httpClientFacto
                 fullError += $" → {inner.Message}";
                 inner = inner.InnerException;
             }
-            results.Add(new
+            results.Add(new DiagnosticsTargetResult
             {
-                target = name,
-                url,
-                ok = false,
-                error = fullError,
-                errorType = ex.GetType().Name,
-                stackTrace = ex.StackTrace?.Split('\n', StringSplitOptions.TrimEntries).Take(3)
+                Target = name,
+                Url = url,
+                Ok = false,
+                Error = fullError,
+                ErrorType = ex.GetType().Name,
+                StackTrace = ex.StackTrace?.Split('\n', StringSplitOptions.TrimEntries).Take(3)
             });
         }
     }
 
-    // 也检测系统代理
     string? systemProxy = null;
     try
     {
@@ -213,15 +303,23 @@ app.MapGet("/api/diagnostics/network", async (IHttpClientFactory httpClientFacto
     }
     catch { }
 
-    return Results.Ok(new
+    return Results.Ok(new DiagnosticsResult
     {
-        systemProxy,
-        machineName = Environment.MachineName,
-        osVersion = Environment.OSVersion.ToString(),
-        results
+        SystemProxy = systemProxy,
+        MachineName = Environment.MachineName,
+        OsVersion = Environment.OSVersion.ToString(),
+        Results = results
     });
 });
 
 app.MapFallbackToFile("index.html");
 
 app.Run();
+
+static string GetFullError(Exception ex)
+{
+    var msg = ex.Message;
+    var inner = ex.InnerException;
+    while (inner != null) { msg += $" → {inner.Message}"; inner = inner.InnerException; }
+    return msg;
+}
